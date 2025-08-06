@@ -1,0 +1,2 @@
+std::sync::Arc<std::sync::Mutex<std::option::Option<burn::tensor::Tensor<B, 2>>>>: burn::module::Module<B>
+tabpfn::architectures::base::transformer::_::<impl tabpfn::settings::_::_serde::Deserialize<'de> for tabpfn::architectures::base::transformer::PerFeatureTransformerRecordItem<B, S>>::deserialize::__Visitor<'de, B, S>

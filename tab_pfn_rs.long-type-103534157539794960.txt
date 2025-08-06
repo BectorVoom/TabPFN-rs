@@ -1,0 +1,5 @@
+(dyn tabpfn::architectures::base::encoders::InputEncoder<<B as burn::tensor::backend::AutodiffBackend>::InnerBackend> + 'static)
+std::ptr::Unique<(dyn tabpfn::architectures::base::encoders::InputEncoder<<B as burn::tensor::backend::AutodiffBackend>::InnerBackend> + 'static)>
+std::boxed::Box<(dyn tabpfn::architectures::base::encoders::InputEncoder<<B as burn::tensor::backend::AutodiffBackend>::InnerBackend> + 'static)>
+tabpfn::architectures::base::transformer::PerFeatureTransformer<<B as burn::tensor::backend::AutodiffBackend>::InnerBackend>
+<tabpfn::architectures::base::transformer::PerFeatureTransformer<B> as burn::module::AutodiffModule<B>>::InnerModule

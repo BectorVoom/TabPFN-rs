@@ -1,0 +1,1 @@
+<tabpfn::architectures::base::transformer::PerFeatureTransformerRecord<B> as burn::record::Record<B>>::Item<S>
