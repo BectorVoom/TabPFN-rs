@@ -123,7 +123,7 @@ impl<B: Backend> LayerStack<B> {
         Self::new(layers, recompute_each_layer, min_num_layers_layer_dropout)
     }
 
-    pub fn forward(
+    pub fn LayerStack_forward(
         &self,
         x: Tensor<B, 4>,
         single_eval_pos: Option<usize>,
