@@ -123,8 +123,8 @@ impl<B: Backend> LayerStack<B> {
         Self::new(layers, recompute_each_layer, min_num_layers_layer_dropout)
     }
 
-    pub fn LayerStack_forward(
-        &self,
+    pub fn layerstack_forward(
+        &mut self,
         x: Tensor<B, 4>,
         single_eval_pos: Option<usize>,
         cache_trainset_representation: bool,
@@ -146,13 +146,13 @@ impl<B: Backend> LayerStack<B> {
         };
 
         let mut output = x;
-        for layer in self.layers.iter().take(n_layers) {
+        for layer in self.layers.iter_mut().take(n_layers) {
             if self.recompute_each_layer && B::ad_enabled() {
                 // In Burn, gradient checkpointing would be handled differently
                 // For now, we'll just apply the layer normally
-                output = layer.forward(output, single_eval_pos, cache_trainset_representation);
+                output = layer.encoder_forward(output, single_eval_pos, cache_trainset_representation, None);
             } else {
-                output = layer.forward(output, single_eval_pos, cache_trainset_representation);
+                output = layer.encoder_forward(output, single_eval_pos, cache_trainset_representation, None);
             }
         }
 
@@ -345,8 +345,8 @@ impl<B: Backend> PerFeatureTransformer<B> {
         }
     }
 
-    pub fn forward(
-        &self,
+    pub fn transformer_forward(
+        &mut self,
         x: HashMap<String, Tensor<B, 3>>,
         y: Option<HashMap<String, Tensor<B, 3>>>,
         only_return_standard_out: bool,
@@ -432,14 +432,14 @@ impl<B: Backend> PerFeatureTransformer<B> {
         // y_main[single_eval_pos..] = leak_prevention;
 
         // Encode y
-        let embedded_y = self.y_encoder.forward(
+        let embedded_y = self.y_encoder.input_encoder_forward(
             &y_processed,
             Some(single_eval_pos),
             self.cache_trainset_representation,
         )?.swap_dims(0, 1);
 
         // Encode x  
-        let embedded_x = self.encoder.forward(
+        let embedded_x = self.encoder.input_encoder_forward(
             &x_processed,
             Some(single_eval_pos),
             self.cache_trainset_representation,
@@ -469,16 +469,16 @@ impl<B: Backend> PerFeatureTransformer<B> {
             embedded_input.clone()
         };
 
-        let encoder_out = self.transformer_encoder.forward(
+        let encoder_out = self.transformer_encoder.layerstack_forward(
             encoder_input,
             Some(single_eval_pos),
             self.cache_trainset_representation,
         );
 
-        let final_encoder_out = if let Some(ref decoder) = self.transformer_decoder {
+        let final_encoder_out = if let Some(ref mut decoder) = self.transformer_decoder {
             // Apply decoder for test data
             let test_input = embedded_input.narrow(1, single_eval_pos, seq_len - single_eval_pos);
-            let test_encoder_out = decoder.forward(
+            let test_encoder_out = decoder.layerstack_forward(
                 test_input,
                 Some(0),
                 false,

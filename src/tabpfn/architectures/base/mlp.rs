@@ -64,7 +64,7 @@ impl Activation {
 ///     # let device = Default::default();
 ///     let (mlp, config) = MLP::<Backend>::new(128, 256, Activation::GELU, &device, true, false);
 ///     let x = Tensor::<Backend, 2>::zeros([32, 128], &device);
-///     let output = mlp.forward(x, &config, false, false, None);
+///     let output = mlp.mlp_forward(x, &config, false, false, None);
 ///     ```
 #[derive(Module, Debug)]
 pub struct MLP<B: Backend> {
@@ -216,7 +216,7 @@ impl<B: Backend> MLP<B> {
     ///         forward pass. This requires 'add_input' and 'allow_inplace' to be true.
     ///         See the documentation of the trait 'SavePeakMemFactor'
     ///         for details. Default is None.
-    pub fn forward<const D: usize>(
+    pub fn mlp_forward<const D: usize>(
         &self,
         x: Tensor<B, D>,
         config: &MLPConfig,
@@ -293,7 +293,7 @@ mod tests {
             MLP::<TestBackend>::new(64, 128, Activation::RELU, &device, false, false);
 
         let x: Tensor<TestBackend, 2> = Tensor::zeros([32, 64], &device);
-        let output = mlp.forward(x, &config, false, false, None);
+        let output = mlp.mlp_forward(x, &config, false, false, None);
 
         assert_eq!(output.shape().dims, [32, 64]);
     }
@@ -305,7 +305,7 @@ mod tests {
             MLP::<TestBackend>::new(64, 128, Activation::GELU, &device, false, false);
 
         let x: Tensor<TestBackend, 3> = Tensor::zeros([8, 16, 64], &device);
-        let output = mlp.forward(x, &config, false, false, None);
+        let output = mlp.mlp_forward(x, &config, false, false, None);
 
         assert_eq!(output.shape().dims, [8, 16, 64]);
     }
@@ -317,7 +317,7 @@ mod tests {
             MLP::<TestBackend>::new(64, 128, Activation::RELU, &device, false, false);
 
         let x: Tensor<TestBackend, 2> = Tensor::ones([4, 64], &device);
-        let output = mlp.forward(x.clone(), &config, true, true, None);
+        let output = mlp.mlp_forward(x.clone(), &config, true, true, None);
 
         // With add_input=true, output should include the original input
         assert_eq!(output.shape().dims, [4, 64]);
@@ -329,7 +329,7 @@ mod tests {
         let (mlp, config) = MLP::<TestBackend>::new(32, 64, Activation::GELU, &device, true, false);
 
         let x: Tensor<TestBackend, 2> = Tensor::ones([2, 32], &device);
-        let output = mlp.forward(x, &config, false, false, None);
+        let output = mlp.mlp_forward(x, &config, false, false, None);
 
         // With zero initialization of output weights, the final output should be zeros
         // (since we're only going through linear2 which has zero weights)
@@ -343,7 +343,7 @@ mod tests {
             MLP::<TestBackend>::new(32, 64, Activation::RELU, &device, false, false);
 
         let x: Tensor<TestBackend, 2> = Tensor::ones([8, 32], &device);
-        let output = mlp.forward(x, &config, false, true, Some(2));
+        let output = mlp.mlp_forward(x, &config, false, true, Some(2));
 
         assert_eq!(output.shape().dims, [8, 32]);
     }
@@ -367,8 +367,8 @@ mod tests {
         let x: Tensor<TestBackend, 2> = Tensor::ones([4, 16], &device);
 
         // Both methods should produce identical results
-        let output_standard = mlp_standard.forward(x.clone(), &config_standard, false, false, None);
-        let output_checkpoint = mlp_checkpoint.forward(x, &config_checkpoint, false, false, None);
+        let output_standard = mlp_standard.mlp_forward(x.clone(), &config_standard, false, false, None);
+        let output_checkpoint = mlp_checkpoint.mlp_forward(x, &config_checkpoint, false, false, None);
 
         assert_eq!(output_standard.shape().dims, output_checkpoint.shape().dims);
 

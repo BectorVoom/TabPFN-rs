@@ -130,7 +130,7 @@ fn test_mlp_forward(data: MLPTestData, test_type: String) -> TestResult {
         .reshape([batch_size, feature_size]);
     
     // Forward pass
-    let output = mlp.forward(
+    let output = mlp.mlp_forward(
         input_tensor,
         &config,
         data.add_input,

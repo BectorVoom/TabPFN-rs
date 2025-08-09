@@ -378,7 +378,7 @@ pub fn remove_outliers<B: Backend>(
 ///
 /// All input encoders should implement this trait.
 pub trait InputEncoder<B: Backend> {
-    fn forward(&self, x: Tensor<B, 3>, single_eval_pos: usize) -> Tensor<B, 3>;
+    fn input_encoder_forward(&self, x: Tensor<B, 3>, single_eval_pos: usize) -> Tensor<B, 3>;
 }
 
 /// Abstract base trait for sequential encoder steps.
@@ -426,7 +426,7 @@ impl<B: Backend> SequentialEncoder<B> {
     }
 
     /// Apply the sequence of encoder steps to the input.
-    pub fn forward_with_steps<T>(
+    pub fn sequential_encoder_forward_with_steps<T>(
         &self,
         input: Tensor<B, 3>,
         steps: &[T],
@@ -446,7 +446,7 @@ impl<B: Backend> SequentialEncoder<B> {
 }
 
 impl<B: Backend> InputEncoder<B> for SequentialEncoder<B> {
-    fn forward(&self, x: Tensor<B, 3>, _single_eval_pos: usize) -> Tensor<B, 3> {
+fn input_encoder_forward(&self, x: Tensor<B, 3>, _single_eval_pos: usize) -> Tensor<B, 3> {
         // For the base implementation, just return the input
         // In practice, you'd store the steps and apply them
         x
@@ -478,7 +478,7 @@ impl<B: Backend> LinearInputEncoderStep<B> {
         }
     }
 
-    pub fn forward(&self, x: Tensor<B, 3>) -> Tensor<B, 3> {
+    pub fn linear_encoder_forward(&self, x: Tensor<B, 3>) -> Tensor<B, 3> {
         let mut input = x;
 
         if self.replace_nan_by_zero {
@@ -493,14 +493,14 @@ impl<B: Backend> LinearInputEncoderStep<B> {
 }
 
 impl<B: Backend> InputEncoder<B> for LinearInputEncoderStep<B> {
-    fn forward(&self, x: Tensor<B, 3>, _single_eval_pos: usize) -> Tensor<B, 3> {
-        self.forward(x)
+    fn input_encoder_forward(&self, x: Tensor<B, 3>, _single_eval_pos: usize) -> Tensor<B, 3> {
+        self.linear_encoder_forward(x)
     }
 }
 
 impl<B: Backend> SeqEncStep<B> for LinearInputEncoderStep<B> {
     fn transform(&self, x: Tensor<B, 3>, _single_eval_pos: usize) -> Result<Tensor<B, 3>, String> {
-        Ok(self.forward(x))
+        Ok(self.linear_encoder_forward(x))
     }
 }
 
@@ -527,7 +527,7 @@ impl<B: Backend> NanHandlingEncoderStep<B> {
         }
     }
 
-    pub fn forward(&self, x: Tensor<B, 3>) -> (Tensor<B, 3>, Option<Tensor<B, 3>>) {
+    pub fn nan_handling_forward(&self, x: Tensor<B, 3>) -> (Tensor<B, 3>, Option<Tensor<B, 3>>) {
         let mut result = x.clone();
         let mut nan_indicators = None;
 
@@ -557,8 +557,8 @@ impl<B: Backend> NanHandlingEncoderStep<B> {
 }
 
 impl<B: Backend> InputEncoder<B> for NanHandlingEncoderStep<B> {
-    fn forward(&self, x: Tensor<B, 3>, _single_eval_pos: usize) -> Tensor<B, 3> {
-        let (result, _) = self.forward(x);
+    fn input_encoder_forward(&self, x: Tensor<B, 3>, _single_eval_pos: usize) -> Tensor<B, 3> {
+        let (result, _) = self.nan_handling_forward(x);
         result
     }
 }
@@ -571,7 +571,7 @@ impl<B: Backend> SeqEncStep<B> for NanHandlingEncoderStep<B> {
     }
 
     fn transform(&self, x: Tensor<B, 3>, _single_eval_pos: usize) -> Result<Tensor<B, 3>, String> {
-        let (result, _) = self.forward(x);
+        let (result, _) = self.nan_handling_forward(x);
         Ok(result)
     }
 
@@ -1143,7 +1143,7 @@ impl<B: Backend> StyleEncoder<B> {
         Self { embedding, em_size }
     }
 
-    pub fn forward(&self, hyperparameters: Tensor<B, 2>) -> Tensor<B, 2> {
+    pub fn style_encoder_forward(&self, hyperparameters: Tensor<B, 2>) -> Tensor<B, 2> {
         self.embedding.forward(hyperparameters)
     }
 }
@@ -1181,7 +1181,7 @@ impl<B: Backend> MulticlassClassificationTargetEncoder<B> {
         y
     }
 
-    pub fn forward(&self, y: Tensor<B, 3>) -> Tensor<B, 3> {
+    pub fn target_encoder_forward(&self, y: Tensor<B, 3>) -> Tensor<B, 3> {
         // For now, return input unchanged - would need proper implementation
         // of unique value computation and target flattening
         y
@@ -1434,7 +1434,7 @@ mod tests {
         let data = TensorData::from([[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]]);
         let tensor = Tensor::<TestBackend, 3>::from_data(data, &device);
 
-        let output = step.forward(tensor);
+        let output = step.linear_encoder_forward(tensor);
         assert_eq!(output.dims(), [1, 2, 5]);
     }
 
@@ -1446,7 +1446,7 @@ mod tests {
         let data = TensorData::from([[[1.0, f32::NAN, 3.0], [f32::INFINITY, 5.0, 6.0]]]);
         let tensor = Tensor::<TestBackend, 3>::from_data(data, &device);
 
-        let (output, indicators) = step.forward(tensor);
+        let (output, indicators) = step.nan_handling_forward(tensor);
         assert_eq!(output.dims(), [1, 2, 3]);
         assert!(indicators.is_some());
     }

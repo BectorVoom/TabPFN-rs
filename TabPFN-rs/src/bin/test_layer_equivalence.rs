@@ -86,7 +86,7 @@ fn test_layer_forward_basic() -> Result<(), String> {
     );
     
     // Run forward pass
-    let output = layer.forward(
+    let output = layer.encoder_forward(
         test_input.clone(),
         0, // single_eval_pos (no test set)
         false, // cache_trainset_representation
@@ -144,7 +144,7 @@ fn test_layer_without_feature_attention() -> Result<(), String> {
         &device
     );
     
-    let output = layer.forward(
+    let output = layer.encoder_forward(
         test_input.clone(),
         0,
         false,
@@ -197,7 +197,7 @@ fn test_layer_with_second_mlp() -> Result<(), String> {
         &device
     );
     
-    let output = layer.forward(
+    let output = layer.encoder_forward(
         test_input.clone(),
         0,
         false,

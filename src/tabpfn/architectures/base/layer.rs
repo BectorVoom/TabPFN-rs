@@ -77,7 +77,7 @@ impl<B: Backend> LayerNorm<B> {
     /// 
     /// Returns:
     ///     The layer normalized tensor.
-    pub fn forward_3d(
+    pub fn layernorm_forward_3d(
         &self,
         input: Tensor<B, 3>,
         _allow_inplace: bool,
@@ -97,7 +97,7 @@ impl<B: Backend> LayerNorm<B> {
         x.reshape([input_shape.dims[0], input_shape.dims[1], input_shape.dims[2]])
     }
 
-    pub fn forward_4d(
+    pub fn layernorm_forward_4d(
         &self,
         input: Tensor<B, 4>,
         _allow_inplace: bool,
@@ -303,7 +303,7 @@ impl<B: Backend> PerFeatureEncoderLayer<B> {
     /// 
     /// Returns:
     ///     The transformer state passed through the encoder layer.
-    pub fn forward(
+    pub fn encoder_forward(
         &mut self,
         state: Tensor<B, 4>,
         single_eval_pos: usize,
@@ -425,7 +425,7 @@ impl<B: Backend> PerFeatureEncoderLayer<B> {
 
             // Post-norm
             if !self.pre_norm {
-                current_state = self.layer_norms[*norm_idx].forward_4d(
+                current_state = self.layer_norms[*norm_idx].layernorm_forward_4d(
                     current_state,
                     true, // allow_inplace
                     save_peak_mem_factor,
@@ -779,7 +779,7 @@ impl<B: Backend> PerFeatureEncoderLayer<B> {
         ).unwrap();
         
         // Apply MLP with memory optimization
-        self.mlp.forward(x, &config, true, true, mem_factor)
+        self.mlp.mlp_forward(x, &config, true, true, mem_factor)
     }
 
     fn apply_second_mlp(
@@ -800,7 +800,7 @@ impl<B: Backend> PerFeatureEncoderLayer<B> {
                 self.recompute_attn,
             ).unwrap();
             
-            second_mlp.forward(x, &config, true, true, mem_factor)
+            second_mlp.mlp_forward(x, &config, true, true, mem_factor)
         } else {
             panic!("Second MLP is None but was called");
         }

@@ -162,13 +162,13 @@ impl<B: Backend> TabPFNInstance<B> {
     /// 
     /// # Returns
     /// Output tensor of shape [sequence_length, batch_size, num_classes] for classification
-    pub fn forward(&self, input: Tensor<B, 3>) -> Tensor<B, 3> {
+    pub fn forward(&mut self, input: Tensor<B, 3>) -> Tensor<B, 3> {
         // Convert input to expected format for PerFeatureTransformer
         let mut x_map = std::collections::HashMap::new();
         x_map.insert("main".to_string(), input);
         
         // Call transformer forward with required parameters
-        match self.transformer.forward(
+        match self.transformer.transformer_forward(
             x_map,
             None, // No y provided (inference mode)
             true, // only_return_standard_out
