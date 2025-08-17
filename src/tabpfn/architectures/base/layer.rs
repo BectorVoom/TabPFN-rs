@@ -4,7 +4,7 @@
 // usage. Could likely just remove it.
 
 use burn::{
-    nn::{LayerNorm as BurnLayerNorm, LayerNormConfig},
+    nn::LayerNorm as BurnLayerNorm,
     prelude::{Backend, Module, Tensor},
 };
 use std::marker::PhantomData;
@@ -13,16 +13,28 @@ use super::{
     attention::{Attention, full_attention::MultiHeadAttention},
     config::ModelConfig,
     mlp::MLP,
+    transformer::DeterministicRngContext,
 };
 
-// Constants
-const HIDDEN_SIZE_LIMIT: usize = 512;
-const MLP_SAVE_PEAK_MEM_FACTOR: i64 = 32;
+// Constants removed - no longer needed after LayerNorm and MLP optimizations
 
 /// Custom LayerNorm module that supports saving peak memory factor.
-/// 
+///
 /// This module extends the Burn LayerNorm implementation to handle FP16 inputs
 /// efficiently and support saving peak memory factor.
+///
+/// # Device Consistency
+/// 
+/// The LayerNorm module is created with a specific device and all operations
+/// are performed on that device. Burn handles device placement automatically,
+/// but the module stores device information for consistency validation when needed.
+///
+/// # Mathematical Properties
+///
+/// LayerNorm normalizes the input tensor over the last dimension(s) specified
+/// by `normalized_shape`, producing output with zero mean and unit variance.
+/// The normalization is applied as: `(x - mean) / sqrt(var + eps) * weight + bias`
+/// where weight is initialized to 1 and bias to 0 by default.
 #[derive(Module, Debug)]
 pub struct LayerNorm<B: Backend> {
     /// The underlying Burn LayerNorm layer
@@ -33,50 +45,57 @@ pub struct LayerNorm<B: Backend> {
 }
 
 impl<B: Backend> LayerNorm<B> {
-    /// Create a new LayerNorm with the given normalized shape and epsilon
+    /// Create a new LayerNorm with the given normalized shape and epsilon.
+    ///
+    /// # Arguments
+    ///
+    /// * `normalized_shape` - The shape over which to normalize (typically the last dimension)
+    /// * `eps` - Small value added to denominator for numerical stability
+    /// * `_elementwise_affine` - Ignored (Burn's LayerNorm always has elementwise affine)
+    /// * `device` - The device on which to create the LayerNorm module
+    ///
+    /// # Returns
+    ///
+    /// A new LayerNorm instance configured for the specified normalization shape
     pub fn new(
         normalized_shape: Vec<usize>,
         eps: f64,
         _elementwise_affine: bool, // Burn's LayerNorm always has elementwise affine
-        device: &B::Device,
+        rng_ctx: &DeterministicRngContext<B>,
     ) -> Self {
         // Burn's LayerNorm expects a single dimension
         let d_model = normalized_shape[0];
-        let config = LayerNormConfig::new(d_model).with_epsilon(eps);
         
-        let layer_norm = config.init(device);
-        
+        // Use deterministic LayerNorm creation for consistency
+        // (Note: LayerNorm weights are deterministically initialized to 1 and bias to 0)
+        let layer_norm = rng_ctx.create_deterministic_layer_norm::<B>(d_model, eps);
+
         Self {
             layer_norm,
-            normalized_shape,
+            normalized_shape: normalized_shape.clone(),
         }
     }
 
     /// Compute the layer normalization.
-    /// 
-    /// If the input is FP16 and the normalized shape is less than 512, the computation
-    /// is optimized for performance.
+    ///
+    /// Applies the underlying Burn LayerNorm to the input tensor.
     fn compute(&self, x: Tensor<B, 2>) -> Tensor<B, 2> {
-        // In Burn, we don't have the same FP16 optimization concerns as PyTorch
-        // The backend handles precision automatically
-        let sum: usize = self.normalized_shape.iter().sum();
-        if sum < HIDDEN_SIZE_LIMIT {
-            // Apply layer norm with potential optimization for smaller sizes
-            self.layer_norm.forward(x)
-        } else {
-            self.layer_norm.forward(x)
-        }
+        // In Burn, the backend handles precision and optimizations automatically
+        self.layer_norm.forward(x)
     }
 
     /// Perform layer normalization on the input tensor.
-    /// 
+    ///
     /// Args:
-    ///     input: The input tensor (can be 3D or 4D).
+    ///     input: The input tensor (3D).
     ///     allow_inplace: Whether to allow in-place operations (not used in Burn).
     ///     save_peak_mem_factor: The factor to save peak memory (not used directly).
-    /// 
+    ///
     /// Returns:
     ///     The layer normalized tensor.
+    ///
+    /// # Panics
+    /// Panics if the total number of elements is not divisible by the normalized shape elements.
     pub fn layernorm_forward_3d(
         &self,
         input: Tensor<B, 3>,
@@ -86,17 +105,39 @@ impl<B: Backend> LayerNorm<B> {
         let input_shape = input.shape();
         let total_elements: usize = input_shape.dims.iter().product();
         let normalized_elements: usize = self.normalized_shape.iter().product();
-        
+
+        // Validate divisibility before reshape
+        assert!(
+            total_elements % normalized_elements == 0,
+            "LayerNorm shape mismatch: total elements {} not divisible by normalized shape elements {}. Input shape: {:?}, normalized_shape: {:?}",
+            total_elements,
+            normalized_elements,
+            input_shape.dims,
+            self.normalized_shape
+        );
+
         // Reshape to match LayerNorm requirements: [batch_size, normalized_shape...]
         let batch_size = total_elements / normalized_elements;
         let x = input.reshape([batch_size, normalized_elements]);
-        
+
         let x = self.compute(x);
-        
+
         // Reshape back to original 3D shape
         x.reshape([input_shape.dims[0], input_shape.dims[1], input_shape.dims[2]])
     }
 
+    /// Perform layer normalization on the input tensor.
+    ///
+    /// Args:
+    ///     input: The input tensor (4D).
+    ///     allow_inplace: Whether to allow in-place operations (not used in Burn).
+    ///     save_peak_mem_factor: The factor to save peak memory (not used directly).
+    ///
+    /// Returns:
+    ///     The layer normalized tensor.
+    ///
+    /// # Panics
+    /// Panics if the total number of elements is not divisible by the normalized shape elements.
     pub fn layernorm_forward_4d(
         &self,
         input: Tensor<B, 4>,
@@ -106,23 +147,41 @@ impl<B: Backend> LayerNorm<B> {
         let input_shape = input.shape();
         let total_elements: usize = input_shape.dims.iter().product();
         let normalized_elements: usize = self.normalized_shape.iter().product();
-        
+
+        // Validate divisibility before reshape
+        assert!(
+            total_elements % normalized_elements == 0,
+            "LayerNorm shape mismatch: total elements {} not divisible by normalized shape elements {}. Input shape: {:?}, normalized_shape: {:?}",
+            total_elements,
+            normalized_elements,
+            input_shape.dims,
+            self.normalized_shape
+        );
+
         // Reshape to match LayerNorm requirements: [batch_size, normalized_shape...]
         let batch_size = total_elements / normalized_elements;
         let x = input.reshape([batch_size, normalized_elements]);
-        
+
         let x = self.compute(x);
-        
+
         // Reshape back to original 4D shape
         x.reshape([input_shape.dims[0], input_shape.dims[1], input_shape.dims[2], input_shape.dims[3]])
+    }
+
+    /// Validate that an input tensor is compatible with this LayerNorm
+    /// In Burn, device consistency is typically handled automatically by the framework
+    pub fn validate_tensor_compatibility<const D: usize>(&self, _input: &Tensor<B, D>) -> Result<(), String> {
+        // Burn handles device consistency automatically in most cases
+        // This method exists for future extensibility if needed
+        Ok(())
     }
 }
 
 /// Transformer encoder layer that processes each feature block separately.
-/// 
+///
 /// This layer consists of multi-head attention between features, multi-head
 /// attention between items, and feedforward neural networks (MLPs).
-/// 
+///
 /// It supports various configurations and optimization options.
 #[derive(Module, Debug)]
 pub struct PerFeatureEncoderLayer<B: Backend> {
@@ -136,7 +195,7 @@ pub struct PerFeatureEncoderLayer<B: Backend> {
     second_mlp: Option<MLP<B>>,
     /// Layer normalization modules (3 or 4 depending on second_mlp)
     layer_norms: Vec<LayerNorm<B>>,
-    
+
     // Configuration fields (not trainable parameters)
     #[module(skip)]
     pre_norm: bool,
@@ -176,12 +235,14 @@ impl<B: Backend> PerFeatureEncoderLayer<B> {
         d_k: Option<usize>,
         d_v: Option<usize>,
         precomputed_kv: Option<(Option<Tensor<B, 4>>, Option<Tensor<B, 4>>)>,
+        rng_ctx: &DeterministicRngContext<B>,
+        seed_offset: u64,
     ) -> Result<Self, String> {
         // Validate configuration
         if config.emsize as usize % config.nhead as usize != 0 && (d_k.is_none() || d_v.is_none()) {
             return Err("config.emsize must be divisible by config.nhead if d_k and d_v are not provided".to_string());
         }
-        
+
         if config.multiquery_item_attention_for_test_set && config.multiquery_item_attention {
             return Err(
                 "Cannot use both multiquery_item_attention_for_test_set and multiquery_item_attention".to_string()
@@ -197,15 +258,17 @@ impl<B: Backend> PerFeatureEncoderLayer<B> {
             Some(MultiHeadAttention::new(
                 d_k,
                 d_v,
-                device,
                 config,
                 1, // share_kv_across_n_heads
                 None, // dropout_p
-                None, // softmax_scale  
+                None, // softmax_scale
                 zero_init,
                 None, // precomputed_k
                 None, // precomputed_v
                 None, // precomputed_kv
+                rng_ctx,
+                seed_offset + 500, // init_seed_offset for features attention
+                false, // inference_mode
             ))
         } else {
             None
@@ -222,7 +285,6 @@ impl<B: Backend> PerFeatureEncoderLayer<B> {
         let self_attn_between_items = MultiHeadAttention::new(
             d_k,
             d_v,
-            device,
             config,
             if config.multiquery_item_attention {
                 config.nhead as usize
@@ -235,25 +297,30 @@ impl<B: Backend> PerFeatureEncoderLayer<B> {
             precomputed_k,
             precomputed_v,
             precomputed_kv_tensor,
+            rng_ctx,
+            seed_offset + 600, // init_seed_offset for items attention
+            false, // inference_mode
         );
 
-        // Create MLP
+        // Create MLP using the provided device (consistent device usage)
         let (mlp, _mlp_config) = MLP::new_with_str_activation(
             config.emsize as usize,
             dim_feedforward,
             &activation,
-            device,
+            rng_ctx,
+            seed_offset + 300, // MLP seed offset
             zero_init,
             config.recompute_attn,
         )?;
 
-        // Create second MLP if requested
+        // Create second MLP if requested using the same device
         let (second_mlp, _second_mlp_config) = if second_mlp {
             let (mlp, _config) = MLP::new_with_str_activation(
                 config.emsize as usize,
                 dim_feedforward,
                 &activation,
-                device,
+                rng_ctx,
+                seed_offset + 400, // Second MLP seed offset
                 zero_init,
                 config.recompute_attn,
             )?;
@@ -265,15 +332,19 @@ impl<B: Backend> PerFeatureEncoderLayer<B> {
         // Create layer norms (3 or 4 depending on second_mlp)
         let num_layer_norms = if second_mlp.is_some() { 4 } else { 3 };
         let mut layer_norms = Vec::with_capacity(num_layer_norms);
-        
-        for _ in 0..num_layer_norms {
+
+        for i in 0..num_layer_norms {
             layer_norms.push(LayerNorm::new(
                 vec![config.emsize as usize],
                 layer_norm_eps,
                 layer_norm_with_elementwise_affine,
-                device,
+                rng_ctx,
             ));
         }
+
+        // Device consistency note: Burn handles device placement automatically
+        // All components (LayerNorms, MLPs, Attention) are created with the same device parameter
+        // and Burn ensures consistent device usage across operations
 
         Ok(Self {
             self_attn_between_features,
@@ -294,13 +365,13 @@ impl<B: Backend> PerFeatureEncoderLayer<B> {
     }
 
     /// Pass the input through the encoder layer.
-    /// 
+    ///
     /// Args:
     ///     state: The transformer state of shape (batch_size, num_items, num_feature_blocks, d_model).
     ///     single_eval_pos: Position from which everything is treated as test set.
     ///     cache_trainset_representation: Whether to cache the trainset representation.
     ///     att_src: Optional tensor to attend to from the final encoder layer.
-    /// 
+    ///
     /// Returns:
     ///     The transformer state passed through the encoder layer.
     pub fn encoder_forward(
@@ -353,7 +424,7 @@ impl<B: Backend> PerFeatureEncoderLayer<B> {
         // Build sublayers in order
         let mut sublayers: Vec<(&str, usize)> = Vec::new();
         let mut layer_norm_idx = 0;
-        
+
         // Add attention between features if available
         if self.self_attn_between_features.is_some() {
             sublayers.push(("features_attention", layer_norm_idx));
@@ -378,7 +449,7 @@ impl<B: Backend> PerFeatureEncoderLayer<B> {
 
         // Process through sublayers
         let mut current_state = state;
-        
+
         for (_sublayer_idx, (sublayer_type, norm_idx)) in sublayers.iter().enumerate() {
             // Pre-norm (currently disabled with assertion)
             if self.pre_norm {
@@ -444,26 +515,26 @@ impl<B: Backend> PerFeatureEncoderLayer<B> {
         if let Some(ref mut attn) = self.self_attn_between_features {
             // Input shape: [batch_size, num_items, num_feature_blocks, d_model]
             // We need to transform this to work with attention which expects 3D tensors
-            
+
             let x_shape = x.shape().dims;
-            let [batch_size, num_items, num_feature_blocks, d_model] = 
+            let [batch_size, num_items, num_feature_blocks, d_model] =
                 [x_shape[0], x_shape[1], x_shape[2], x_shape[3]];
-            
+
             // For attention between features, we need to process each item separately
             // since attention expects [batch, seq, d_model] where d_model matches emsize
             // We'll apply attention across feature blocks for each item position
-            
+
             let mut item_results = Vec::new();
-            
+
             for item_idx in 0..num_items {
                 // Extract one item across all features: [batch, features, d_model]
                 let x_item = x.clone().slice([
                     0..batch_size,
-                    item_idx..(item_idx + 1), 
+                    item_idx..(item_idx + 1),
                     0..num_feature_blocks,
                     0..d_model,
                 ]).squeeze::<3>(1); // Remove the item dimension: [batch, features, d_model]
-                
+
                 // Apply attention across features for this item
                 let attended_item = attn.forward(
                     x_item,
@@ -476,12 +547,12 @@ impl<B: Backend> PerFeatureEncoderLayer<B> {
                     true, // add_input (residual connection)
                     true, // allow_inplace
                 );
-                
+
                 // Add back the item dimension: [batch, 1, features, d_model]
                 let attended_4d = attended_item.unsqueeze_dim(1);
                 item_results.push(attended_4d);
             }
-            
+
             // Concatenate all items back together: [batch, items, features, d_model]
             if item_results.len() == 1 {
                 item_results.into_iter().next().unwrap()
@@ -528,7 +599,7 @@ impl<B: Backend> PerFeatureEncoderLayer<B> {
         save_peak_mem_factor: Option<i64>,
     ) -> Tensor<B, 4> {
         let x_shape = x.shape().dims;
-        let [batch_size, _num_items, num_feature_blocks, d_model] = 
+        let [batch_size, _num_items, num_feature_blocks, d_model] =
             [x_shape[0], x_shape[1], x_shape[2], x_shape[3]];
         let mut result_parts = Vec::new();
 
@@ -540,7 +611,7 @@ impl<B: Backend> PerFeatureEncoderLayer<B> {
                 0..x_shape[2],
                 0..x_shape[3],
             ]);
-            
+
             let kv_src = if single_eval_pos > 0 {
                 Some(x.clone().slice([
                     0..x_shape[0],
@@ -558,7 +629,7 @@ impl<B: Backend> PerFeatureEncoderLayer<B> {
 
             // Process each feature block separately
             let mut test_result_blocks = Vec::new();
-            
+
             for feature_idx in 0..num_feature_blocks {
                 // Extract test feature block: [batch, items, d_model]
                 let x_test_feature = x_test_transposed.clone().slice([
@@ -567,7 +638,7 @@ impl<B: Backend> PerFeatureEncoderLayer<B> {
                     0..(x_shape[1] - single_eval_pos),
                     0..d_model,
                 ]).squeeze::<3>(1);
-                
+
                 // Extract KV for this feature block if available
                 let x_kv_feature = kv_src_transposed.as_ref().map(|src| {
                     src.clone().slice([
@@ -577,25 +648,25 @@ impl<B: Backend> PerFeatureEncoderLayer<B> {
                         0..d_model,
                     ]).squeeze::<3>(1)
                 });
-                
+
                 // Apply attention with multiquery settings
                 let attended_test_feature = self.self_attn_between_items.forward(
                     x_test_feature,
                     x_kv_feature,
                     false, // cache_kv
-                    !single_eval_pos != 0, // use_cached_kv when single_eval_pos == 0
+                    single_eval_pos != 0, // use_cached_kv when single_eval_pos != 0
                     true, // reuse_first_head_kv
                     false, // only_cache_first_head_kv
                     save_peak_mem_factor,
                     true, // add_input (residual connection)
                     true, // allow_inplace
                 );
-                
+
                 // Add dimension back: [batch, 1, items, d_model]
                 let attended_4d = attended_test_feature.unsqueeze_dim(1);
                 test_result_blocks.push(attended_4d);
             }
-            
+
             // Concatenate feature blocks and transpose back
             let test_result_transposed = if test_result_blocks.len() == 1 {
                 test_result_blocks.into_iter().next().unwrap()
@@ -603,7 +674,7 @@ impl<B: Backend> PerFeatureEncoderLayer<B> {
                 Tensor::cat(test_result_blocks, 1)
             };
             let new_x_test = test_result_transposed.swap_dims(1, 2);
-            
+
             result_parts.push(new_x_test);
         }
 
@@ -621,7 +692,7 @@ impl<B: Backend> PerFeatureEncoderLayer<B> {
 
             // Process each feature block separately
             let mut train_result_blocks = Vec::new();
-            
+
             for feature_idx in 0..num_feature_blocks {
                 // Extract train feature block: [batch, items, d_model]
                 let x_train_feature = x_train_transposed.clone().slice([
@@ -630,7 +701,7 @@ impl<B: Backend> PerFeatureEncoderLayer<B> {
                     0..single_eval_pos,
                     0..d_model,
                 ]).squeeze::<3>(1);
-                
+
                 // Apply self-attention
                 let attended_train_feature = self.self_attn_between_items.forward(
                     x_train_feature.clone(),
@@ -643,12 +714,12 @@ impl<B: Backend> PerFeatureEncoderLayer<B> {
                     true, // add_input (residual connection)
                     true, // allow_inplace
                 );
-                
+
                 // Add dimension back: [batch, 1, items, d_model]
                 let attended_4d = attended_train_feature.unsqueeze_dim(1);
                 train_result_blocks.push(attended_4d);
             }
-            
+
             // Concatenate feature blocks and transpose back
             let train_result_transposed = if train_result_blocks.len() == 1 {
                 train_result_blocks.into_iter().next().unwrap()
@@ -656,7 +727,7 @@ impl<B: Backend> PerFeatureEncoderLayer<B> {
                 Tensor::cat(train_result_blocks, 1)
             };
             let new_x_train = train_result_transposed.swap_dims(1, 2);
-            
+
             result_parts.insert(0, new_x_train);
         }
 
@@ -677,12 +748,12 @@ impl<B: Backend> PerFeatureEncoderLayer<B> {
         save_peak_mem_factor: Option<i64>,
     ) -> Tensor<B, 4> {
         let x_shape = x.shape().dims;
-        let [batch_size, num_items, num_feature_blocks, d_model] = 
+        let [batch_size, num_items, num_feature_blocks, d_model] =
             [x_shape[0], x_shape[1], x_shape[2], x_shape[3]];
-        
+
         // Transpose for attention: (batch, items, features, d_model) -> (batch, features, items, d_model)
         let x_transposed = x.clone().swap_dims(1, 2);
-        
+
         // Prepare attention source (KV)
         let attention_src_x = if let Some(att_src_tensor) = att_src {
             Some(att_src_tensor.clone().swap_dims(1, 2))
@@ -700,7 +771,7 @@ impl<B: Backend> PerFeatureEncoderLayer<B> {
 
         // Process each feature block separately
         let mut result_blocks = Vec::new();
-        
+
         for feature_idx in 0..num_feature_blocks {
             // Extract feature block: [batch, items, d_model]
             let x_feature = x_transposed.clone().slice([
@@ -709,7 +780,7 @@ impl<B: Backend> PerFeatureEncoderLayer<B> {
                 0..num_items,
                 0..d_model,
             ]).squeeze::<3>(1);
-            
+
             // Extract KV for this feature block if available
             let x_kv_feature = attention_src_x.as_ref().map(|src| {
                 src.clone().slice([
@@ -719,7 +790,7 @@ impl<B: Backend> PerFeatureEncoderLayer<B> {
                     0..d_model,
                 ]).squeeze::<3>(1)
             });
-            
+
             // Apply attention
             let attended_feature = self.self_attn_between_items.forward(
                 x_feature,
@@ -732,19 +803,19 @@ impl<B: Backend> PerFeatureEncoderLayer<B> {
                 true, // add_input (residual connection)
                 true, // allow_inplace
             );
-            
+
             // Add dimension back: [batch, 1, items, d_model]
             let attended_4d = attended_feature.unsqueeze_dim(1);
             result_blocks.push(attended_4d);
         }
-        
+
         // Concatenate feature blocks back together
         let result_transposed = if result_blocks.len() == 1 {
             result_blocks.into_iter().next().unwrap()
         } else {
             Tensor::cat(result_blocks, 1)
         };
-        
+
         // Transpose back: (batch, features, items, d_model) -> (batch, items, features, d_model)
         result_transposed.swap_dims(1, 2)
     }
@@ -768,16 +839,18 @@ impl<B: Backend> PerFeatureEncoderLayer<B> {
             None
         };
 
-        // Create MLP config on demand
-        let (_, config) = MLP::<B>::new_with_str_activation(
-            self.emsize,
-            self.dim_feedforward,
-            &self.activation,
-            &B::Device::default(),
-            self.zero_init,
-            self.recompute_attn,
-        ).unwrap();
+        // Create MLP config directly (avoiding device inconsistency from new_with_str_activation)
+        let activation = match self.activation.as_str() {
+            "GELU" => super::mlp::Activation::GELU,
+            "RELU" => super::mlp::Activation::RELU,
+            _ => super::mlp::Activation::GELU, // Default fallback
+        };
         
+        let config = super::mlp::MLPConfig {
+            activation,
+            recompute: self.recompute_attn,
+        };
+
         // Apply MLP with memory optimization
         self.mlp.mlp_forward(x, &config, true, true, mem_factor)
     }
@@ -789,17 +862,19 @@ impl<B: Backend> PerFeatureEncoderLayer<B> {
     ) -> Tensor<B, 4> {
         if let Some(ref mut second_mlp) = self.second_mlp {
             let mem_factor = mlp_save_peak_mem_factor.map(|f| f as usize);
+
+            // Create MLP config directly (avoiding device inconsistency from new_with_str_activation)
+            let activation = match self.activation.as_str() {
+                "GELU" => super::mlp::Activation::GELU,
+                "RELU" => super::mlp::Activation::RELU,
+                _ => super::mlp::Activation::GELU, // Default fallback
+            };
             
-            // Create MLP config on demand
-            let (_, config) = MLP::<B>::new_with_str_activation(
-                self.emsize,
-                self.dim_feedforward,
-                &self.activation,
-                &B::Device::default(),
-                self.zero_init,
-                self.recompute_attn,
-            ).unwrap();
-            
+            let config = super::mlp::MLPConfig {
+                activation,
+                recompute: self.recompute_attn,
+            };
+
             second_mlp.mlp_forward(x, &config, true, true, mem_factor)
         } else {
             panic!("Second MLP is None but was called");
@@ -809,7 +884,7 @@ impl<B: Backend> PerFeatureEncoderLayer<B> {
     /// Empty the trainset representation cache.
     pub fn empty_trainset_representation_cache(&mut self) {
         self.self_attn_between_items.empty_kv_cache();
-        
+
         if let Some(ref mut attn) = self.self_attn_between_features {
             attn.empty_kv_cache(); // not necessary, just in case
         }

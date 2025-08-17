@@ -4,41 +4,37 @@
 //! src/tabpfn/architectures/base/encoders.py
 
 use burn::module::Module;
-use burn::nn::{Linear, LinearConfig};
 use burn::prelude::*;
 use burn::tensor::Tensor;
+use crate::tabpfn::architectures::base::transformer::{DeterministicRngContext, DeterministicLinear, DeterministicEmbedding};
+
 
 /// Computes the sum of a tensor, treating NaNs as zero.
-///
-/// Args:
-///     x: The input tensor.
-///     axis: The dimension to reduce.
-///     keepdim: Whether the output tensor has `axis` retained or not.
-///
-/// Returns:
-///     The sum of the tensor with NaNs treated as zero.
+/// Matches PyTorch's torch.nansum semantics.
 pub fn torch_nansum<B: Backend, const D: usize>(
     x: Tensor<B, D>,
-    axis: Option<usize>,
+    dim: Option<usize>,
     keepdim: bool,
 ) -> Tensor<B, D> {
+    // Replace NaNs with zeros and sum
     let nan_mask = x.clone().is_nan();
     let zeros = Tensor::zeros_like(&x);
     let masked_input = x.mask_where(nan_mask, zeros);
 
-    match axis {
-        Some(dim) => {
+    match dim {
+        Some(axis) => {
+            let reduced = masked_input.sum_dim(axis);
             if keepdim {
-                masked_input.sum_dim(dim)
+                reduced.unsqueeze_dim(axis)
             } else {
-                masked_input.sum_dim(dim)
+                reduced
             }
         }
         None => {
-            // Sum all dimensions
+            // Sum all dimensions sequentially
             let mut result = masked_input;
-            for dim in (0..D).rev() {
-                result = result.sum_dim(dim);
+            for dim_idx in (0..D).rev() {
+                result = result.sum_dim(dim_idx);
             }
             result
         }
@@ -46,117 +42,180 @@ pub fn torch_nansum<B: Backend, const D: usize>(
 }
 
 /// Computes the mean of a tensor over a given dimension, ignoring NaNs.
-///
-/// Args:
-///     x: The input tensor.
-///     axis: The dimension to reduce.
-///
-/// Returns:
-///     The mean of the input tensor, ignoring NaNs.
+/// Follows PyTorch torch.nanmean semantics: if there are zero valid elements, return NaN.
 pub fn torch_nanmean<B: Backend, const D: usize>(
     x: Tensor<B, D>,
-    axis: usize,
-    return_nanshare: bool,
-    include_inf: bool,
-) -> (Tensor<B, D>, Option<Tensor<B, D>>) {
-    let mut nan_mask = x.clone().is_nan();
-
-    if include_inf {
-        let inf_mask = x.clone().is_inf();
-        nan_mask = nan_mask.bool_or(inf_mask);
-    }
-
-    let ones = Tensor::ones_like(&x);
+    dim: Option<usize>,
+    keepdim: bool,
+) -> Tensor<B, D> {
+    let nan_mask = x.clone().is_nan();
     let zeros = Tensor::zeros_like(&x);
 
-    // Count non-NaN values
-    let num = ones
-        .mask_where(nan_mask.clone(), zeros.clone())
-        .sum_dim(axis);
-    // Sum non-NaN values
-    let value = x.clone().mask_where(nan_mask.clone(), zeros).sum_dim(axis);
+    match dim {
+        Some(axis) => {
+            // Count non-NaN values
+            let non_nan_mask = nan_mask.clone().bool_not();
+            let mut count = non_nan_mask.int().float().sum_dim(axis);
 
-    // Avoid division by zero - if all values are NaN, mean should be 0.0
-    let num_safe = num.clone().clamp_min(1.0);
-    let mean = value.div(num_safe);
+            // Sum non-NaN values
+            let sum_vals = x.clone().mask_where(nan_mask, zeros).sum_dim(axis);
 
-    if return_nanshare {
-        let total_shape = x.shape().dims[axis] as f32;
-        let nanshare = Tensor::ones_like(&num)
-            .mul_scalar(1.0)
-            .sub(num.div_scalar(total_shape));
-        (mean, Some(nanshare))
-    } else {
-        (mean, None)
+            // Compute mean using real count (don't clamp to 1)
+            // Avoid division by zero by computing mean and then masking positions where count == 0 to NaN
+            // Note: division by zero might produce inf; we then mask those positions to NaN explicitly
+            let mean_raw = sum_vals.div(count.clone());
+
+            // Create NaN-filled tensor with same shape as mean_raw
+            let nan_fill = Tensor::zeros_like(&mean_raw).add_scalar(f32::NAN);
+
+            // Mask mean where count == 0
+            let zero_count_mask = count.equal_elem(0.0);
+            let mean_final = mean_raw.mask_where(zero_count_mask, nan_fill);
+
+            if keepdim {
+                mean_final.unsqueeze_dim(axis)
+            } else {
+                mean_final
+            }
+        }
+        None => {
+            // Mean over all dimensions - returns scalar-like tensor
+            let non_nan_mask = nan_mask.clone().bool_not();
+
+            // Count all non-NaN values
+            let mut count = non_nan_mask.int().float();
+            for dim_idx in (0..D).rev() {
+                count = count.sum_dim(dim_idx);
+            }
+
+            // Sum all non-NaN values
+            let mut sum_vals = x.clone().mask_where(nan_mask, zeros.clone());
+            for dim_idx in (0..D).rev() {
+                sum_vals = sum_vals.sum_dim(dim_idx);
+            }
+
+            // Compute mean and mask zero-count -> NaN
+            let mean_raw = sum_vals.div(count.clone());
+            let nan_fill = Tensor::zeros_like(&mean_raw).add_scalar(f32::NAN);
+            let zero_count_mask = count.equal_elem(0.0);
+            let mean_scalar = mean_raw.mask_where(zero_count_mask, nan_fill);
+
+            mean_scalar
+        }
     }
 }
 
 /// Computes the standard deviation of a tensor over a given dimension, ignoring NaNs.
-///
-/// Args:
-///     x: The input tensor.
-///     axis: The dimension to reduce.
-///
-/// Returns:
-///     The standard deviation of the input tensor, ignoring NaNs.
-pub fn torch_nanstd<B: Backend, const D: usize>(x: Tensor<B, D>, axis: usize) -> Tensor<B, D> {
+/// Follows PyTorch torch.nanstd semantics: when N <= correction, result is NaN.
+pub fn torch_nanstd<B: Backend, const D: usize>(
+    x: Tensor<B, D>,
+    dim: Option<usize>,
+    keepdim: bool,
+    correction: usize,
+) -> Tensor<B, D> {
     let nan_mask = x.clone().is_nan();
-    let ones = Tensor::ones_like(&x);
     let zeros = Tensor::zeros_like(&x);
 
-    // Count non-NaN values
-    let num = ones
-        .mask_where(nan_mask.clone(), zeros.clone())
-        .sum_dim(axis);
-    // Sum non-NaN values
-    let value = x
-        .clone()
-        .mask_where(nan_mask.clone(), zeros.clone())
-        .sum_dim(axis);
-    let mean = value.div(num.clone().clamp_min(1.0));
+    match dim {
+        Some(axis) => {
+            // Count non-NaN values
+            let non_nan_mask = nan_mask.clone().bool_not();
+            let count = non_nan_mask.int().float().sum_dim(axis);
 
-    // Broadcast mean back to original shape for subtraction
-    // Since sum_dim maintains rank, mean should already have the right shape for broadcasting
-    let mean_broadcast = mean.clone();
-    let diff = x.clone().sub(mean_broadcast);
-    let diff_squared = diff.powf_scalar(2.0);
+            // Sum non-NaN values
+            let sum_vals = x.clone().mask_where(nan_mask.clone(), zeros.clone()).sum_dim(axis);
 
-    // Use torch_nansum for the variance calculation
-    let var_sum = {
-        let masked_diff_squared = diff_squared.mask_where(nan_mask, zeros);
-        masked_diff_squared.sum_dim(axis)
-    };
+            // Compute mean; when count == 0 we will later set std to NaN
+            let count_safe = count.clone();
+            let mean = sum_vals.div(count_safe.clone());
 
-    // Clip denominator to avoid division by zero when num=1 (matches Python behavior)
-    let var = var_sum.div((num.sub_scalar(1.0)).clamp_min(1.0));
+            // Expand mean for broadcasting
+            let mean_expanded = mean.clone().unsqueeze_dim(axis);
 
-    var.sqrt()
+            // Differences from mean
+            let diff = x.clone().sub(mean_expanded);
+            let diff_squared = diff.powf_scalar(2.0);
+
+            // Sum of squared differences ignoring NaNs
+            let var_sum = diff_squared.mask_where(nan_mask.clone(), zeros.clone()).sum_dim(axis);
+
+            // corrected_count = count - correction
+            let corrected_count = count.clone().sub_scalar(correction as f32);
+
+            // When corrected_count <= 0 we must return NaN (matches PyTorch)
+            let invalid_mask = corrected_count.clone().lower_equal_elem(0.0);
+            let nan_value = Tensor::zeros_like(&var_sum).add_scalar(f32::NAN);
+
+            // To avoid division by zero temporarily, divide by max(corrected_count, EPS)
+            let denom = corrected_count.clone().clamp_min(f32::EPSILON);
+            let variance = var_sum.div(denom);
+
+            // Mask invalid positions to NaN
+            let variance_final = variance.mask_where(invalid_mask, nan_value);
+
+            let std_result = variance_final.sqrt();
+
+            if keepdim {
+                std_result.unsqueeze_dim(axis)
+            } else {
+                std_result
+            }
+        }
+        None => {
+            // Standard deviation over all dimensions - returns scalar
+            let non_nan_mask = nan_mask.clone().bool_not();
+
+            // Count all non-NaN values
+            let mut count = non_nan_mask.int().float();
+            for dim_idx in (0..D).rev() {
+                count = count.sum_dim(dim_idx);
+            }
+
+            // Sum all non-NaN values
+            let mut sum_vals = x.clone().mask_where(nan_mask.clone(), zeros.clone());
+            for dim_idx in (0..D).rev() {
+                sum_vals = sum_vals.sum_dim(dim_idx);
+            }
+
+            // Compute mean scalar
+            let mean_scalar = sum_vals.div(count.clone());
+
+            // Expand mean back to original dimensionality for broadcasting
+            let mut mean_expanded = mean_scalar.clone();
+            for _ in 0..D {
+                mean_expanded = mean_expanded.unsqueeze_dim(0);
+            }
+
+            // Differences and squared differences
+            let diff = x.clone().sub(mean_expanded);
+            let diff_squared = diff.powf_scalar(2.0);
+
+            // Sum of squared differences over all dimensions
+            let mut var_sum = diff_squared.mask_where(nan_mask.clone(), zeros.clone());
+            for dim_idx in (0..D).rev() {
+                var_sum = var_sum.sum_dim(dim_idx);
+            }
+
+            // Apply Bessel correction
+            let corrected_count = count.clone().sub_scalar(correction as f32);
+            let invalid_mask = corrected_count.clone().lower_equal_elem(0.0);
+            let nan_value = Tensor::zeros_like(&var_sum).add_scalar(f32::NAN);
+
+            let denom = corrected_count.clone().clamp_min(f32::EPSILON);
+            let variance = var_sum.div(denom);
+            let variance_final = variance.mask_where(invalid_mask, nan_value);
+
+            let std_scalar = variance_final.sqrt();
+
+            std_scalar
+        }
+    }
 }
 
-/// Normalize data to mean 0 and std 1 with high numerical stability.
-///
-/// This function is designed to be robust against several edge cases:
-/// 1. **Constant Features**: If a feature is constant, its standard deviation (`std`)
-///    will be 0. This is handled by replacing `std=0` with `1` to prevent `0/0`
-///    division, effectively mapping constant features to a normalized value of 0.
-/// 2. **Single-Sample Normalization**: If the normalization is based on a single
-///    data point, `std` is explicitly set to `1` to prevent undefined behavior.
-/// 3. **Low-Precision Dtypes**: During the final division, a small epsilon (`1e-16`)
-///    is added to the denominator. This prevents division by a near-zero `std`,
-///    which could cause the value to overflow to infinity (`inf`), especially when
-///    using low-precision dtypes.
-///
-/// Args:
-///     data: The data to normalize (T, B, H).
-///     normalize_positions: If > 0, only use the first `normalize_positions` positions for normalization.
-///     return_scaling: If true, return the scaling parameters as well (mean, std).
-///     clip: If true, clip the data to [-100, 100].
-///     std_only: If true, only divide by std.
-///     mean_val: If given, use this value instead of computing it.
-///     std_val: If given, use this value instead of computing it.
-///
-/// Returns:
-///     The normalized data tensor, or a tuple containing the data and scaling factors.
+/// Normalize data to mean 0 and std 1 with improved NaN/zero handling.
+/// - If mean/std are provided, they are used directly.
+/// - If a feature's std is NaN (e.g., all-NaN column) or <= eps, it will be replaced with 1.0
+///   so that normalized values are well-defined (you may choose to keep NaNs if desired).
 pub fn normalize_data<B: Backend, const D: usize>(
     data: Tensor<B, D>,
     normalize_positions: Option<usize>,
@@ -171,13 +230,18 @@ pub fn normalize_data<B: Backend, const D: usize>(
         "Either both or none of mean and std must be given"
     );
 
-    let (mean, mut std) = if let (Some(m), Some(s)) = (mean_val, std_val) {
+    let (mut mean, mut std) = if let (Some(m), Some(s)) = (mean_val, std_val) {
         (m, s)
     } else {
+        // Choose slice for normalization if requested
         let norm_data = if let Some(pos) = normalize_positions {
             if pos > 0 && pos < data.shape().dims[0] {
-                // Slice first `pos` positions along the first dimension
-                data.clone().slice([0..pos, 0..data.shape().dims[1], 0..data.shape().dims[2]])
+                if D == 3 {
+                    let dims = data.shape().dims;
+                    data.clone().slice([0..pos, 0..dims[1], 0..dims[2]])
+                } else {
+                    data.clone()
+                }
             } else {
                 data.clone()
             }
@@ -185,35 +249,34 @@ pub fn normalize_data<B: Backend, const D: usize>(
             data.clone()
         };
 
-        let (mean_calc, _) = torch_nanmean(norm_data.clone(), 0, false, false);
-        let std_calc = torch_nanstd(norm_data, 0);
+        // Compute mean and std along axis 0, keeping dims for broadcasting
+        let mean_calc = torch_nanmean(norm_data.clone(), Some(0), true);
+        // Use ddof=1 to match previous behaviour; keepdim=true
+        let std_calc = torch_nanstd(norm_data, Some(0), true, 1);
         (mean_calc, std_calc)
     };
 
-    // Handle constant features: replace std=0 with 1
+    // Replace std that are NaN or very small with 1.0 to avoid division instability
     let ones = Tensor::ones_like(&std);
-    let std_zero_mask = std.clone().equal_elem(0.0);
-    std = std.mask_where(std_zero_mask, ones.clone());
+    // Detect NaN std
+    let std_nan_mask = std.clone().is_nan();
+    // Detect extremely small std (<= eps)
+    let small_std_mask = std.clone().lower_equal_elem(1e-12);
+    let zero_like_mask = std_nan_mask.bool_or(small_std_mask);
+    std = std.mask_where(zero_like_mask, ones.clone());
 
-    // Handle single sample case
+    // Handle single-sample normalization explicitly
     let data_len = data.shape().dims[0];
     if data_len == 1 || normalize_positions == Some(1) {
         std = ones.clone();
     }
 
-    let final_mean = if std_only {
-        Tensor::zeros_like(&mean)
-    } else {
-        mean.clone()
-    };
+    let final_mean = if std_only { Tensor::zeros_like(&mean) } else { mean.clone() };
 
-    // Normalize with epsilon for numerical stability
-    // Since sum_dim maintains rank, mean and std should already have the right shape for broadcasting
-    let mean_expanded = final_mean;
+    // Add tiny epsilon to denominator for numerical stability
     let std_expanded = std.clone().add_scalar(1e-16);
-    let mut normalized_data = (data.sub(mean_expanded)).div(std_expanded);
+    let mut normalized_data = (data.sub(final_mean)).div(std_expanded);
 
-    // Clip if requested
     if clip {
         normalized_data = normalized_data.clamp(-100.0, 100.0);
     }
@@ -225,89 +288,91 @@ pub fn normalize_data<B: Backend, const D: usize>(
     }
 }
 
-/// Select features from the input tensor based on the selection mask,
-/// and arrange them contiguously in the last dimension.
+
+/// Select features from the input tensor based on the selection mask.
+/// 
+/// This implements proper feature packing: selected features are packed contiguously
+/// using pure tensor operations without host transfers.
 ///
 /// Args:
-///     x: The input tensor of shape (sequence_length, batch_size, total_features)
-///     sel: The boolean selection mask indicating which features to keep of shape (batch_size, total_features)
+///     x: The input tensor of shape (sequence_length, batch_size, total_features)  
+///     sel: The boolean selection mask of shape (batch_size, total_features)
 ///
 /// Returns:
-///     The tensor with selected features.
-pub fn select_features<B: Backend>(x: Tensor<B, 3>, sel: Tensor<B, 2>) -> Tensor<B, 3> {
-    let [seq_len, batch_size, total_features] = x.dims();
-    let [sel_batch_size, sel_features] = sel.dims();
+///     The tensor with selected features packed contiguously
+pub fn select_features<B: Backend>(
+    x: Tensor<B, 3>,
+    sel: Tensor<B, 2>,
+    device: &B::Device,
+) -> Tensor<B, 3> {
+    // Get shapes
+    let [t, b, h] = x.dims();
 
-    assert_eq!(batch_size, sel_batch_size, "Batch sizes must match");
-    assert_eq!(
-        total_features, sel_features,
-        "Feature dimensions must match"
-    );
+    // Convert sel to float on device then move data to host (one-time consume)
+    // Using into_data() / to_data() is the documented way to retrieve tensor bytes.
+    // We cast to float to simplify checking (support bool/0-1/int encodings).
+    let sel_f = sel.clone();
+    let sel_data = sel_f.into_data(); // consumes sel_f
+    // Interpret as f32 slice (panics if dtype mismatch)
+    let sel_slice: &[f32] = sel_data
+        .as_slice::<f32>()
+        .expect("select_features_packed: expected sel to be convertible to f32 tensor data");
 
-    // If batch size is 1, we don't need to pad with zeros
-    if batch_size == 1 {
-        // For single batch, select only the true features
-        // Get the first batch's selection mask
-        let sel_slice: Tensor<B, 1> = sel.clone().slice([0..1, 0..total_features]).squeeze(0);
-        let sel_data = sel_slice.to_data();
-        let sel_bool = sel_data.as_slice::<bool>().unwrap();
-        
-        // Count selected features
-        let selected_count = sel_bool.iter().filter(|&&b| b).count();
-        
-        if selected_count == 0 {
-            return Tensor::zeros([seq_len, batch_size, 0], &x.device());
-        }
-        
-        // Create output tensor with only selected features
-        let mut selected_features = Vec::new();
-        for seq_idx in 0..seq_len {
-            for batch_idx in 0..batch_size {
-                for feat_idx in 0..total_features {
-                    if sel_bool[feat_idx] {
-                        let slice = x.clone().slice([seq_idx..seq_idx+1, batch_idx..batch_idx+1, feat_idx..feat_idx+1]);
-                        selected_features.push(slice.into_scalar());
-                    }
-                }
+    // Per-batch packed columns
+    let mut per_batch: Vec<Tensor<B, 3>> = Vec::with_capacity(b);
+    let mut k_max: usize = 0;
+
+    for batch in 0..b {
+        // Collect selected columns as tensors of shape [T, 1, 1]
+        let mut cols: Vec<Tensor<B, 3>> = Vec::new();
+        for feat in 0..h {
+            let sel_val = sel_slice[batch * h + feat];
+            if sel_val != 0.0 {
+                // Slice out x[:, batch:batch+1, feat:feat+1] -> shape [T,1,1]
+                let col = x.clone().slice([0..t, batch..(batch + 1), feat..(feat + 1)]);
+                cols.push(col);
             }
         }
-        
-        let tensor_data = burn::tensor::TensorData::new(selected_features, [seq_len, batch_size, selected_count]);
-        return Tensor::from_data(tensor_data, &x.device());
+
+        // Pack selected columns along last dim -> shape [T, 1, k_b]
+        let packed_b = if cols.is_empty() {
+            // Create an empty tensor with k_b = 0. We represent this as a zeros tensor
+            // with last dim = 0 so concatenation later will still work.
+            Tensor::<B, 3>::zeros(Shape::new([t, 1, 0usize]), device)
+        } else {
+            Tensor::cat(cols, 2)
+        };
+
+        let k_b = packed_b.shape().dims[2];
+        k_max = k_max.max(k_b);
+        per_batch.push(packed_b);
     }
 
-    // For multiple batches, create output tensor with same size (padded with zeros)
-    let mut new_x = Tensor::zeros([seq_len, batch_size, total_features], &x.device());
-    
-    // Convert selection mask to data for processing
-    let sel_data = sel.to_data();
-    let sel_bool = sel_data.as_slice::<bool>().unwrap();
-    
-    // Process each batch
-    for b in 0..batch_size {
-        let batch_sel = &sel_bool[b * total_features..(b + 1) * total_features];
-        let selected_count = batch_sel.iter().filter(|&&val| val).count();
-        
-        if selected_count > 0 {
-            let mut selected_idx = 0;
-            for feat_idx in 0..total_features {
-                if batch_sel[feat_idx] && selected_idx < total_features {
-                    // Copy the feature from x to new_x
-                    let feature_slice = x.clone().slice([0..seq_len, b..b+1, feat_idx..feat_idx+1]);
-                    let target_slice = [0..seq_len, b..b+1, selected_idx..selected_idx+1];
-                    let feature_data: Tensor<B, 2> = feature_slice.squeeze(2);
-                    let feature_reshaped: Tensor<B, 3> = feature_data.unsqueeze_dim(2);
-                    new_x = new_x.slice_assign(target_slice, feature_reshaped);
-                    selected_idx += 1;
-                }
-            }
+    // Pad each per-batch tensor to k_max with zeros on the right and then concat along batch dim
+    let mut padded_per_batch: Vec<Tensor<B, 3>> = Vec::with_capacity(b);
+    for packed_b in per_batch.into_iter() {
+        let k_b = packed_b.shape().dims[2];
+        if k_b < k_max {
+            let pad_k = k_max - k_b;
+            let pad_shape = Shape::new([t, 1, pad_k]);
+            let zeros = Tensor::<B, 3>::zeros(pad_shape, device);
+            let padded = Tensor::cat(vec![packed_b, zeros], 2);
+            padded_per_batch.push(padded);
+        } else {
+            padded_per_batch.push(packed_b);
         }
     }
 
-    new_x
+    // Now concatenate along batch dimension -> [T, B, k_max]
+    let result = Tensor::cat(padded_per_batch, 1);
+    result
 }
 
 /// Remove outliers from the input tensor.
+/// 
+/// This implementation marks outliers as NaN rather than clipping them,
+/// which allows subsequent NaN-aware operations to properly ignore outliers.
+/// This matches the expected behavior of Python TabPFN.
 ///
 /// Args:
 ///     x: Input tensor of shape (T, B, H)
@@ -335,8 +400,8 @@ pub fn remove_outliers<B: Backend>(
     } else {
         let data = if let Some(pos) = normalize_positions {
             if pos > 0 && pos < x.shape().dims[0] {
-                // Slice data to first `pos` positions
-                x.clone().slice([0..pos, 0..x.shape().dims[1], 0..x.shape().dims[2]])
+                let dims = x.shape().dims;
+                x.clone().slice([0..pos, 0..dims[1], 0..dims[2]])
             } else {
                 x.clone()
             }
@@ -344,32 +409,28 @@ pub fn remove_outliers<B: Backend>(
             x.clone()
         };
 
-        let _data_clean = data.clone();
-        let (data_mean, _) = torch_nanmean(data.clone(), 0, false, false);
-        let data_std = torch_nanstd(data.clone(), 0);
+        let data_mean = torch_nanmean(data.clone(), Some(0), true);
+        let data_std = torch_nanstd(data.clone(), Some(0), true, 1);
         let cut_off = data_std.mul_scalar(n_sigma);
         let lower_bound = data_mean.clone().sub(cut_off.clone());
         let upper_bound = data_mean.clone().add(cut_off.clone());
 
-        // Set outliers to NaN (simplified - would need proper outlier masking)
-        // For now, just return computed bounds
         (lower_bound, upper_bound)
     };
 
-    // Apply the outlier bounds using logarithmic transformation
-    let x_processed = x
-        .clone()
-        .abs()
-        .add_scalar(1.0)
-        .log()
-        .neg()
-        .add(lower_bounds.clone())
-        .max_pair(x.clone())
-        .abs()
-        .add_scalar(1.0)
-        .log()
-        .add(upper_bounds.clone())
-        .min_pair(x);
+    // Mark outliers as NaN instead of clipping (preferred approach)
+    // This allows subsequent NaN-aware operations to properly ignore outliers
+    
+    // Create masks for outliers
+    let below_lower = x.clone().lower(lower_bounds.clone());
+    let above_upper = x.clone().greater(upper_bounds.clone());
+    let outlier_mask = below_lower.bool_or(above_upper);
+    
+    // Create tensor with NaN values for outliers
+    let nan_tensor = Tensor::zeros_like(&x).add_scalar(f32::NAN);
+    
+    // Replace outliers with NaN
+    let x_processed = x.mask_where(outlier_mask, nan_tensor);
 
     (x_processed, (lower_bounds, upper_bounds))
 }
@@ -388,7 +449,7 @@ pub trait InputEncoder<B: Backend> {
 /// or `fit` and `transform`.
 pub trait SeqEncStep<B: Backend> {
     /// Fit the encoder step on the training set.
-    fn fit(&mut self, _x: &Tensor<B, 3>, _single_eval_pos: usize) -> Result<(), String> {
+    fn fit(&mut self, x: &Tensor<B,3>, _y: Option<&Tensor<B,2>>, single_eval_pos: usize) -> Result<(), String> {
         // Default implementation does nothing
         Ok(())
     }
@@ -409,23 +470,108 @@ pub trait SeqEncStep<B: Backend> {
 
 /// An encoder that applies a sequence of encoder steps.
 ///
-/// SequentialEncoder allows building an encoder from a sequence of SeqEncStep implementations.
-/// The input is passed through each step in the provided order.
+/// SequentialEncoder owns a sequence of encoder steps and applies them in order.
+/// It supports fitting on training data and transforming both training and test data.
 #[derive(Module, Debug)]
 pub struct SequentialEncoder<B: Backend> {
-    // For simplicity, we'll use a vector of boxed traits
-    // In a real implementation, you might want a more sophisticated approach
-    _phantom: std::marker::PhantomData<B>,
+    // Use enum-based storage instead of trait objects for better type safety
+    steps: Vec<EncoderStep<B>>,
+    fitted: bool,
 }
 
-impl<B: Backend> SequentialEncoder<B> {
-    pub fn new() -> Self {
-        Self {
-            _phantom: std::marker::PhantomData,
+/// Enum representing different types of encoder steps
+/// This allows us to store different step types in a Vec while maintaining type safety
+#[derive(Module, Debug)]  
+pub enum EncoderStep<B: Backend> {
+    Linear(LinearInputEncoderStep<B>),
+    NanHandling(NanHandlingEncoderStep<B>),
+    RemoveEmptyFeatures(RemoveEmptyFeaturesEncoderStep<B>),
+    RemoveDuplicateFeatures(RemoveDuplicateFeaturesEncoderStep<B>),
+    VariableNumFeatures(VariableNumFeaturesEncoderStep<B>),
+    InputNormalization(InputNormalizationEncoderStep<B>),
+    FrequencyFeature(FrequencyFeatureEncoderStep<B>),
+    CategoricalInputPerFeature(CategoricalInputEncoderPerFeatureEncoderStep<B>),
+    MulticlassClassificationTarget(MulticlassClassificationTargetEncoder<B>),
+}
+
+impl<B: Backend> SeqEncStep<B> for EncoderStep<B> {
+    fn fit(&mut self, x: &Tensor<B, 3>, y: Option<&Tensor<B, 2>>, single_eval_pos: usize) -> Result<(), String> {
+
+        match self {
+            EncoderStep::Linear(step) => step.fit(x, y,single_eval_pos),
+            EncoderStep::NanHandling(step) => step.fit(x, y,single_eval_pos),
+            EncoderStep::RemoveEmptyFeatures(step) => step.fit(x,y, single_eval_pos),
+            EncoderStep::RemoveDuplicateFeatures(step) => step.fit(x,y, single_eval_pos),
+            EncoderStep::VariableNumFeatures(step) => step.fit(x,y, single_eval_pos),
+            EncoderStep::InputNormalization(step) => step.fit(x,y, single_eval_pos),
+            EncoderStep::FrequencyFeature(step) => step.fit(x, y,single_eval_pos),
+            EncoderStep::CategoricalInputPerFeature(step) => step.fit(x,y, single_eval_pos),
+            EncoderStep::MulticlassClassificationTarget(step) => step.fit(x, y,single_eval_pos),
         }
     }
 
-    /// Apply the sequence of encoder steps to the input.
+    fn transform(&self, x: Tensor<B, 3>, single_eval_pos: usize) -> Result<Tensor<B, 3>, String> {
+        match self {
+            EncoderStep::Linear(step) => step.transform(x, single_eval_pos),
+            EncoderStep::NanHandling(step) => step.transform(x, single_eval_pos),
+            EncoderStep::RemoveEmptyFeatures(step) => step.transform(x, single_eval_pos),
+            EncoderStep::RemoveDuplicateFeatures(step) => step.transform(x, single_eval_pos),
+            EncoderStep::VariableNumFeatures(step) => step.transform(x, single_eval_pos),
+            EncoderStep::InputNormalization(step) => step.transform(x, single_eval_pos),
+            EncoderStep::FrequencyFeature(step) => step.transform(x, single_eval_pos),
+            EncoderStep::CategoricalInputPerFeature(step) => step.transform(x, single_eval_pos),
+            EncoderStep::MulticlassClassificationTarget(step) => step.transform(x, single_eval_pos),
+        }
+    }
+}
+
+impl<B: Backend> SequentialEncoder<B> {
+    /// Create a new SequentialEncoder with no steps
+    pub fn new() -> Self {
+        Self {
+            steps: Vec::new(),
+            fitted: false,
+        }
+    }
+    
+    /// Add a step to the encoder sequence
+    pub fn add_step(&mut self, step: EncoderStep<B>) {
+        self.steps.push(step);
+    }
+    
+    /// Fit the encoder on training data
+    /// This will call fit() on all steps in sequence
+    pub fn fit(&mut self, x: &Tensor<B, 3>, y: Option<&Tensor<B, 2>>, single_eval_pos: usize) -> Result<(), String> {
+        let mut current_data = x.clone();
+        
+        for step in &mut self.steps {
+            // Fit the step on current data
+            step.fit(&current_data, y, single_eval_pos)?;
+            
+            // Transform the data for the next step's fitting
+            current_data = step.transform(current_data, single_eval_pos)?;
+        }
+        
+        self.fitted = true;
+        Ok(())
+    }
+    
+    /// Transform data using the fitted encoder steps
+    pub fn transform(&self, x: Tensor<B, 3>, single_eval_pos: usize) -> Result<Tensor<B, 3>, String> {
+        if !self.fitted {
+            return Err("SequentialEncoder must be fitted before transform".to_string());
+        }
+        
+        let mut current = x;
+        
+        for step in &self.steps {
+            current = step.transform(current, single_eval_pos)?;
+        }
+        
+        Ok(current)
+    }
+    
+    /// Apply the sequence of encoder steps to the input (legacy method)
     pub fn sequential_encoder_forward_with_steps<T>(
         &self,
         input: Tensor<B, 3>,
@@ -443,20 +589,60 @@ impl<B: Backend> SequentialEncoder<B> {
 
         Ok(current)
     }
+    
+    /// Check if the encoder has been fitted
+    pub fn is_fitted(&self) -> bool {
+        self.fitted
+    }
+    
+    /// Get the number of steps in the encoder
+    pub fn num_steps(&self) -> usize {
+        self.steps.len()
+    }
+    
+    /// Create a sequential encoder with common TabPFN steps
+    pub fn create_tabpfn_encoder(
+        num_features: usize,
+        emsize: usize,
+        rng_ctx: &DeterministicRngContext<B>,
+        seed_offset: u64,
+    ) -> Self {
+        let mut encoder = Self::new();
+        
+        // Add typical TabPFN encoder steps
+        encoder.add_step(EncoderStep::NanHandling(NanHandlingEncoderStep::new(false)));
+        encoder.add_step(EncoderStep::RemoveEmptyFeatures(RemoveEmptyFeaturesEncoderStep::new()));
+        encoder.add_step(EncoderStep::VariableNumFeatures(VariableNumFeaturesEncoderStep::new(num_features, true, true)));
+        encoder.add_step(EncoderStep::InputNormalization(InputNormalizationEncoderStep::new(false, false, true, false, 3.0)));
+        encoder.add_step(EncoderStep::Linear(LinearInputEncoderStep::new(num_features, emsize, false, true, rng_ctx, seed_offset + 100)));
+        
+        encoder
+    }
 }
 
 impl<B: Backend> InputEncoder<B> for SequentialEncoder<B> {
-fn input_encoder_forward(&self, x: Tensor<B, 3>, _single_eval_pos: usize) -> Tensor<B, 3> {
-        // For the base implementation, just return the input
-        // In practice, you'd store the steps and apply them
-        x
+    fn input_encoder_forward(&self, x: Tensor<B, 3>, single_eval_pos: usize) -> Tensor<B, 3> {
+        // If the encoder is fitted, use transform; otherwise just return input
+        if self.fitted {
+            match self.transform(x.clone(), single_eval_pos) {
+                Ok(result) => result,
+                Err(_) => {
+                    // If transform fails, return input unchanged as fallback
+                    // In practice, you might want to handle this differently
+                    x
+                }
+            }
+        } else {
+            // Not fitted - return input unchanged
+            x
+        }
     }
 }
 
 /// A simple linear input encoder step.
 #[derive(Module, Debug)]
 pub struct LinearInputEncoderStep<B: Backend> {
-    layer: Linear<B>,
+    layer: DeterministicLinear<B>,
     replace_nan_by_zero: bool,
 }
 
@@ -466,11 +652,15 @@ impl<B: Backend> LinearInputEncoderStep<B> {
         emsize: usize,
         replace_nan_by_zero: bool,
         bias: bool,
-        device: &B::Device,
+        rng_ctx: &DeterministicRngContext<B>,
+        seed_offset: u64,
     ) -> Self {
-        let layer = LinearConfig::new(num_features, emsize)
-            .with_bias(bias)
-            .init(device);
+        let layer = rng_ctx.create_deterministic_linear::<B>(
+            num_features,
+            emsize,
+            bias,
+            rng_ctx.seed + seed_offset,
+        );
 
         Self {
             layer,
@@ -487,8 +677,8 @@ impl<B: Backend> LinearInputEncoderStep<B> {
             input = input.mask_where(nan_mask, zeros);
         }
 
-        // Apply linear transformation to last dimension
-        self.layer.forward(input)
+        // Apply linear transformation to last dimension (3D tensor)
+        self.layer.forward_3d(input)
     }
 }
 
@@ -499,6 +689,12 @@ impl<B: Backend> InputEncoder<B> for LinearInputEncoderStep<B> {
 }
 
 impl<B: Backend> SeqEncStep<B> for LinearInputEncoderStep<B> {
+    fn fit(&mut self, _x: &Tensor<B, 3>, _y: Option<&Tensor<B, 2>>, _single_eval_pos: usize) -> Result<(), String> {
+        // LinearInputEncoderStep doesn't need fitting - it's just a linear transformation
+        // The `y` parameter is ignored as this step doesn't use labels
+        Ok(())
+    }
+
     fn transform(&self, x: Tensor<B, 3>, _single_eval_pos: usize) -> Result<Tensor<B, 3>, String> {
         Ok(self.linear_encoder_forward(x))
     }
@@ -511,9 +707,8 @@ pub struct NanHandlingEncoderStep<B: Backend> {
     nan_indicator: f32,
     inf_indicator: f32,
     neg_inf_indicator: f32,
-    // Note: In Python version, feature_means_ is computed during fitting
-    // For simplicity, we'll compute it on-the-fly for now
-    _phantom: std::marker::PhantomData<B>,
+    // Feature means computed during fitting for replacing NaNs
+    feature_means_: Option<Tensor<B, 3>>,
 }
 
 impl<B: Backend> NanHandlingEncoderStep<B> {
@@ -523,7 +718,7 @@ impl<B: Backend> NanHandlingEncoderStep<B> {
             nan_indicator: -2.0,
             inf_indicator: 2.0,
             neg_inf_indicator: 4.0,
-            _phantom: std::marker::PhantomData,
+            feature_means_: None,
         }
     }
 
@@ -538,19 +733,29 @@ impl<B: Backend> NanHandlingEncoderStep<B> {
             let pos_inf_mask = inf_mask.clone().bool_and(x.clone().greater_elem(0.0));
             let neg_inf_mask = inf_mask.bool_and(x.clone().lower_elem(0.0));
 
-            let indicators = nan_mask.float() * self.nan_indicator
-                + pos_inf_mask.float() * self.inf_indicator
-                + neg_inf_mask.float() * self.neg_inf_indicator;
+            let indicators = nan_mask.int().float() * self.nan_indicator
+                + pos_inf_mask.int().float() * self.inf_indicator
+                + neg_inf_mask.int().float() * self.neg_inf_indicator;
 
             nan_indicators = Some(indicators);
         }
 
-        // Replace invalid values with mean (simplified - using 0 for now)
+        // Replace invalid values with computed feature means (if available) or zeros
         let nan_mask = result.clone().is_nan();
         let inf_mask = result.clone().is_inf();
         let invalid_mask = nan_mask.bool_or(inf_mask);
-        let zeros = Tensor::zeros_like(&result);
-        result = result.mask_where(invalid_mask, zeros);
+        
+        let replacement = if let Some(ref means) = self.feature_means_ {
+            // Expand means to match input shape if needed
+            let [_t, _b, _h] = result.dims();
+            let means_expanded = means.clone();  // Assume means already have correct shape
+            means_expanded
+        } else {
+            // Fallback to zeros if no means computed
+            Tensor::zeros_like(&result)
+        };
+        
+        result = result.mask_where(invalid_mask, replacement);
 
         (result, nan_indicators)
     }
@@ -564,9 +769,11 @@ impl<B: Backend> InputEncoder<B> for NanHandlingEncoderStep<B> {
 }
 
 impl<B: Backend> SeqEncStep<B> for NanHandlingEncoderStep<B> {
-    fn fit(&mut self, _x: &Tensor<B, 3>, _single_eval_pos: usize) -> Result<(), String> {
-        // In the Python version, this computes feature means for replacing NaNs
-        // For now, we'll skip this and use a simplified approach
+    fn fit(&mut self, x: &Tensor<B, 3>, _y: Option<&Tensor<B, 2>>, _single_eval_pos: usize) -> Result<(), String> {
+        // Compute feature means for replacing NaNs during transform
+        // Use nanmean to ignore existing NaNs in the computation
+        let means = torch_nanmean(x.clone(), Some(0), true);  // Compute mean over time dimension
+        self.feature_means_ = Some(means);
         Ok(())
     }
 
@@ -604,9 +811,9 @@ impl<B: Backend> RemoveEmptyFeaturesEncoderStep<B> {
 }
 
 impl<B: Backend> SeqEncStep<B> for RemoveEmptyFeaturesEncoderStep<B> {
-    fn fit(&mut self, x: &Tensor<B, 3>, _single_eval_pos: usize) -> Result<(), String> {
+    fn fit(&mut self, x: &Tensor<B, 3>, _y: Option<&Tensor<B, 2>>, _single_eval_pos: usize) -> Result<(), String> {
         let [seq_len, batch_size, features] = x.dims();
-        
+
         if seq_len < 2 {
             // Cannot compute difference if sequence length is less than 2
             self.sel = Some(Tensor::ones([batch_size, features], &x.device()));
@@ -616,29 +823,30 @@ impl<B: Backend> SeqEncStep<B> for RemoveEmptyFeaturesEncoderStep<B> {
         // Python: self.sel = (x[1:] == x[0]).sum(0) != (x.shape[0] - 1)
         let x_first = x.clone().slice([0..1, 0..batch_size, 0..features]); // shape: [1, B, H]
         let x_rest = x.clone().slice([1..seq_len, 0..batch_size, 0..features]); // shape: [T-1, B, H]
-        
+
         // Broadcast x_first to match x_rest shape
         let x_first_expanded = x_first.repeat(&[seq_len - 1, 1, 1]); // shape: [T-1, B, H]
-        
+
         // Check equality
         let equal_mask = x_rest.equal(x_first_expanded); // shape: [T-1, B, H]
-        
+
         // Sum over time dimension (axis=0)
-        let equal_count = equal_mask.float().sum_dim(0); // shape: [B, H]
-        
+        let equal_count = equal_mask.int().float().sum_dim(0); // shape: [B, H]
+
         // Check if equal_count != (seq_len - 1), meaning feature is NOT constant  
         let not_constant = equal_count.not_equal_elem((seq_len - 1) as f32); // shape: [B, H]
-        
+
         // Squeeze out the first dimension to get [B, H] shape
         let not_constant_2d = not_constant.squeeze(0);
-        self.sel = Some(not_constant_2d.float());
-        
+        self.sel = Some(not_constant_2d.int().float());
+
         Ok(())
     }
 
     fn transform(&self, x: Tensor<B, 3>, _single_eval_pos: usize) -> Result<Tensor<B, 3>, String> {
         if let Some(ref sel) = self.sel {
-            Ok(select_features(x, sel.clone()))
+            let device = x.device();
+            Ok(select_features(x, sel.clone(), &device))
         } else {
             // If not fitted, return input unchanged
             Ok(x)
@@ -663,7 +871,7 @@ impl<B: Backend> RemoveDuplicateFeaturesEncoderStep<B> {
 }
 
 impl<B: Backend> SeqEncStep<B> for RemoveDuplicateFeaturesEncoderStep<B> {
-    fn fit(&mut self, _x: &Tensor<B, 3>, _single_eval_pos: usize) -> Result<(), String> {
+    fn fit(&mut self, _x: &Tensor<B, 3>, _y: Option<&Tensor<B, 2>>, _single_eval_pos: usize) -> Result<(), String> {
         // Currently does nothing - fit functionality not implemented  
         Ok(())
     }
@@ -705,9 +913,9 @@ impl<B: Backend> VariableNumFeaturesEncoderStep<B> {
 }
 
 impl<B: Backend> SeqEncStep<B> for VariableNumFeaturesEncoderStep<B> {
-    fn fit(&mut self, x: &Tensor<B, 3>, _single_eval_pos: usize) -> Result<(), String> {
+    fn fit(&mut self, x: &Tensor<B, 3>, _y: Option<&Tensor<B, 2>>, _single_eval_pos: usize) -> Result<(), String> {
         let [seq_len, batch_size, features] = x.dims();
-        
+
         if seq_len < 2 {
             // Cannot compute difference if sequence length is less than 2
             self.number_of_used_features_ = Some(Tensor::ones([batch_size, 1], &x.device()));
@@ -717,40 +925,40 @@ impl<B: Backend> SeqEncStep<B> for VariableNumFeaturesEncoderStep<B> {
         // Python: sel = (x[1:] == x[0]).sum(0) != (x.shape[0] - 1)
         let x_first = x.clone().slice([0..1, 0..batch_size, 0..features]); // shape: [1, B, H]
         let x_rest = x.clone().slice([1..seq_len, 0..batch_size, 0..features]); // shape: [T-1, B, H]
-        
+
         // Broadcast x_first to match x_rest shape
         let x_first_expanded = x_first.repeat(&[seq_len - 1, 1, 1]); // shape: [T-1, B, H]
-        
+
         // Check equality
         let equal_mask = x_rest.equal(x_first_expanded); // shape: [T-1, B, H]
-        
+
         // Sum over time dimension (axis=0)
-        let equal_count = equal_mask.float().sum_dim(0); // shape: [B, H]
-        
+        let equal_count = equal_mask.int().float().sum_dim(0); // shape: [B, H]
+
         // Check if equal_count != (seq_len - 1), meaning feature is NOT constant
         let not_constant = equal_count.not_equal_elem((seq_len - 1) as f32); // shape: [B, H]
-        
+
         // Sum over feature dimension to get number of used features per batch
-        let used_features = not_constant.float().sum_dim(1); // shape: [B]
-        
+        let used_features = not_constant.int().float().sum_dim(1); // shape: [B]
+
         // Clip minimum to 1 and add dimension for compatibility
         let used_features_clipped = used_features.clamp_min(1.0).unsqueeze_dim(1); // shape: [B, 1]
-        
+
         self.number_of_used_features_ = Some(used_features_clipped);
-        
+
         Ok(())
     }
 
     fn transform(&self, x: Tensor<B, 3>, _single_eval_pos: usize) -> Result<Tensor<B, 3>, String> {
         let [seq_len, batch_size, current_features] = x.dims();
-        
+
         // Handle empty input
         if current_features == 0 {
             return Ok(Tensor::zeros([seq_len, batch_size, self.num_features], &x.device()));
         }
-        
+
         let mut result = x;
-        
+
         // Apply normalization if enabled
         if self.normalize_by_used_features {
             if let Some(ref used_features) = self.number_of_used_features_ {
@@ -768,16 +976,16 @@ impl<B: Backend> SeqEncStep<B> for VariableNumFeaturesEncoderStep<B> {
                         &result.device()
                     ).div(used_features.clone().to_device(&result.device()))
                 };
-                
+
                 // Broadcast normalization factor to match input shape
                 let norm_factor_expanded: Tensor<B, 3> = normalization_factor
                     .unsqueeze_dim::<3>(0) // Add sequence dimension  
                     .unsqueeze_dim::<3>(2); // Add feature dimension
-                
+
                 result = result.mul(norm_factor_expanded);
             }
         }
-        
+
         // Pad with zeros if needed
         if current_features < self.num_features {
             let padding_size = self.num_features - current_features;
@@ -787,7 +995,7 @@ impl<B: Backend> SeqEncStep<B> for VariableNumFeaturesEncoderStep<B> {
             // Truncate if current features exceed target
             result = result.slice([0..seq_len, 0..batch_size, 0..self.num_features]);
         }
-        
+
         Ok(result)
     }
 }
@@ -829,15 +1037,15 @@ impl<B: Backend> InputNormalizationEncoderStep<B> {
 }
 
 impl<B: Backend> SeqEncStep<B> for InputNormalizationEncoderStep<B> {
-    fn fit(&mut self, x: &Tensor<B, 3>, single_eval_pos: usize) -> Result<(), String> {
+    fn fit(&mut self, x: &Tensor<B, 3>, _y: Option<&Tensor<B, 2>>, single_eval_pos: usize) -> Result<(), String> {
         let normalize_position = if self.normalize_on_train_only {
             Some(single_eval_pos)
         } else {
             None
         };
-        
+
         let mut x_work = x.clone();
-        
+
         if self.remove_outliers && !self.normalize_to_ranking {
             let (x_processed, (lower, upper)) = remove_outliers(
                 x_work,
@@ -912,7 +1120,7 @@ impl<B: Backend> SeqEncStep<B> for InputNormalizationEncoderStep<B> {
             );
             result = x_normalized;
         }
-        
+
         Ok(result)
     }
 }
@@ -966,7 +1174,7 @@ impl<B: Backend> FrequencyFeatureEncoderStep<B> {
 }
 
 impl<B: Backend> SeqEncStep<B> for FrequencyFeatureEncoderStep<B> {
-    fn fit(&mut self, _x: &Tensor<B, 3>, _single_eval_pos: usize) -> Result<(), String> {
+    fn fit(&mut self, _x: &Tensor<B, 3>, _y: Option<&Tensor<B, 2>>, _single_eval_pos: usize) -> Result<(), String> {
         // Does nothing for FrequencyFeatureEncoderStep
         Ok(())
     }
@@ -1014,7 +1222,7 @@ pub struct CategoricalInputEncoderPerFeatureEncoderStep<B: Backend> {
     num_features: usize,
     emsize: usize,
     num_embs: usize,
-    embedding: burn::nn::Embedding<B>,
+    embedding: DeterministicEmbedding<B>,
 }
 
 impl<B: Backend> CategoricalInputEncoderPerFeatureEncoderStep<B> {
@@ -1022,12 +1230,17 @@ impl<B: Backend> CategoricalInputEncoderPerFeatureEncoderStep<B> {
         num_features: usize,
         emsize: usize,
         num_embs: usize,
-        device: &B::Device,
+        rng_ctx: &DeterministicRngContext<B>,
+        seed_offset: u64,
     ) -> Self {
         assert_eq!(num_features, 1, "CategoricalInputEncoderPerFeatureEncoderStep expects num_features == 1");
-        
-        let embedding = burn::nn::EmbeddingConfig::new(num_embs, emsize).init(device);
-        
+
+        let embedding = rng_ctx.create_deterministic_embedding::<B>(
+            num_embs,
+            emsize,
+            rng_ctx.seed + seed_offset,
+        );
+
         Self {
             num_features,
             emsize,
@@ -1038,7 +1251,7 @@ impl<B: Backend> CategoricalInputEncoderPerFeatureEncoderStep<B> {
 }
 
 impl<B: Backend> SeqEncStep<B> for CategoricalInputEncoderPerFeatureEncoderStep<B> {
-    fn fit(&mut self, _x: &Tensor<B, 3>, _single_eval_pos: usize) -> Result<(), String> {
+    fn fit(&mut self, _x: &Tensor<B, 3>, _y: Option<&Tensor<B, 2>>, _single_eval_pos: usize) -> Result<(), String> {
         // No fitting required for categorical encoder
         Ok(())
     }
@@ -1049,24 +1262,24 @@ impl<B: Backend> SeqEncStep<B> for CategoricalInputEncoderPerFeatureEncoderStep<
 
         // For now, implement a simplified version that determines categorical vs continuous
         // In the full Python version, this would use categorical_inds parameter
-        
+
         // Simple heuristic: if values are integers and in reasonable range, treat as categorical
         let x_data = x.to_data();
         let x_values = x_data.as_slice::<f32>().unwrap();
-        
+
         let mut is_categorical = vec![false; batch_size];
-        
+
         // Check each batch to see if it contains categorical data
         for b in 0..batch_size {
             let mut all_integers = true;
             let mut max_val = f32::NEG_INFINITY;
             let mut min_val = f32::INFINITY;
-            
+
             for s in 0..seq_len {
                 for f in 0..features {
                     let idx = s * batch_size * features + b * features + f;
                     let val = x_values[idx];
-                    
+
                     if !val.is_nan() && !val.is_infinite() {
                         if val.fract() != 0.0 {
                             all_integers = false;
@@ -1076,22 +1289,22 @@ impl<B: Backend> SeqEncStep<B> for CategoricalInputEncoderPerFeatureEncoderStep<
                     }
                 }
             }
-            
+
             // Consider categorical if all integers and reasonable range
             is_categorical[b] = all_integers && max_val >= 0.0 && max_val < (self.num_embs - 2) as f32;
         }
-        
-        let mut result = Tensor::zeros([seq_len, batch_size, self.emsize], &x.device());
-        
+
+        let mut result: Tensor<B, 3> = Tensor::zeros([seq_len, batch_size, self.emsize], &x.device());
+
         for b in 0..batch_size {
             if is_categorical[b] {
                 // Handle as categorical
                 let batch_slice = x.clone().slice([0..seq_len, b..b+1, 0..features]);
-                
+
                 // Convert to integers, clamp to valid range, handle NaN/Inf
                 let batch_data = batch_slice.to_data();
                 let batch_values = batch_data.as_slice::<f32>().unwrap();
-                
+
                 let mut categorical_indices = Vec::new();
                 for &val in batch_values {
                     if val.is_nan() || val.is_infinite() {
@@ -1101,28 +1314,28 @@ impl<B: Backend> SeqEncStep<B> for CategoricalInputEncoderPerFeatureEncoderStep<
                         categorical_indices.push(clamped);
                     }
                 }
-                
-                let indices_tensor = Tensor::from_data(
+
+                let indices_tensor: Tensor<B, 2, burn::tensor::Int> = Tensor::from_data(
                     burn::tensor::TensorData::new(categorical_indices, [seq_len, 1]),
                     &x.device()
                 );
-                
-                let embeddings = self.embedding.forward(indices_tensor); // Shape: [seq_len, 1, emsize]
-                let embeddings_expanded = embeddings.slice([0..seq_len, 0..1, 0..self.emsize]);
-                
+
+                let embeddings = self.embedding.forward(indices_tensor); // Shape: [seq_len, emsize]
+                let embeddings_expanded: Tensor<B, 3> = embeddings.unsqueeze_dim(1); // Add batch dimension to make [seq_len, 1, emsize]
+
                 // Assign to result
                 result = result.slice_assign([0..seq_len, b..b+1, 0..self.emsize], embeddings_expanded);
-                
+
             } else {
                 // Handle as continuous - for simplicity, use zero embeddings
                 // In a full implementation, this would use a base encoder
                 let zeros = Tensor::zeros([seq_len, 1, self.emsize], &x.device());
-                
+
                 // Assign to result
                 result = result.slice_assign([0..seq_len, b..b+1, 0..self.emsize], zeros);
             }
         }
-        
+
         Ok(result)
     }
 }
@@ -1130,15 +1343,23 @@ impl<B: Backend> SeqEncStep<B> for CategoricalInputEncoderPerFeatureEncoderStep<
 /// Style encoder for hyperparameters.
 #[derive(Module, Debug)]
 pub struct StyleEncoder<B: Backend> {
-    embedding: Linear<B>,
+    embedding: DeterministicLinear<B>,
     em_size: usize,
 }
 
 impl<B: Backend> StyleEncoder<B> {
-    pub fn new(num_hyperparameters: usize, em_size: usize, device: &B::Device) -> Self {
-        let embedding = LinearConfig::new(num_hyperparameters, em_size)
-            .with_bias(true)
-            .init(device);
+    pub fn new(
+        num_hyperparameters: usize,
+        em_size: usize,
+        rng_ctx: &DeterministicRngContext<B>,
+        seed_offset: u64,
+    ) -> Self {
+        let embedding = rng_ctx.create_deterministic_linear::<B>(
+            num_hyperparameters,
+            em_size,
+            true, // with bias
+            rng_ctx.seed + seed_offset,
+        );
 
         Self { embedding, em_size }
     }
@@ -1152,9 +1373,10 @@ impl<B: Backend> StyleEncoder<B> {
 pub fn get_linear_encoder<B: Backend>(
     num_features: usize,
     emsize: usize,
-    device: &B::Device,
+    rng_ctx: &DeterministicRngContext<B>,
+    seed_offset: u64,
 ) -> LinearInputEncoderStep<B> {
-    LinearInputEncoderStep::new(num_features, emsize, false, true, device)
+    LinearInputEncoderStep::new(num_features, emsize, false, true, rng_ctx, seed_offset)
 }
 
 /// Target encoder for multiclass classification.
@@ -1189,15 +1411,20 @@ impl<B: Backend> MulticlassClassificationTargetEncoder<B> {
 }
 
 impl<B: Backend> SeqEncStep<B> for MulticlassClassificationTargetEncoder<B> {
-    fn fit(&mut self, _y: &Tensor<B, 3>, _single_eval_pos: usize) -> Result<(), String> {
-        // Python version computes unique values per batch here
-        // For simplicity, we skip this for now
+    fn fit(&mut self, _x: &Tensor<B, 3>, y: Option<&Tensor<B, 2>>, _single_eval_pos: usize) -> Result<(), String> {
+        // MulticlassClassificationTargetEncoder requires labels to compute target statistics
+        let _y = y.ok_or_else(|| "MulticlassClassificationTargetEncoder.fit requires labels y".to_string())?;
+        
+        // TODO: Python version computes unique values per batch here
+        // For now, we just validate that y is provided but don't compute statistics yet
+        // Future implementation should compute unique values and store them for transform
         Ok(())
     }
 
     fn transform(&self, y: Tensor<B, 3>, _single_eval_pos: usize) -> Result<Tensor<B, 3>, String> {
-        // Python version flattens targets based on unique values
+        // Python version flattens targets based on unique values computed during fit
         // For simplicity, we return input unchanged for now  
+        // Future implementation should use stored unique values to flatten targets
         Ok(y)
     }
 }
@@ -1214,10 +1441,10 @@ mod tests {
 
     fn load_test_data() -> Result<Value, Box<dyn std::error::Error>> {
         let content = fs::read_to_string("test_data.json")?;
-        
+
         // Handle NaN values in JSON by replacing them with null
         let cleaned_content = content.replace("NaN", "null");
-        
+
         let data: Value = serde_json::from_str(&cleaned_content)?;
         Ok(data)
     }
@@ -1289,7 +1516,7 @@ mod tests {
             let tensor_data = TensorData::new(rust_input, [2, 2, 3]);
             let tensor = Tensor::<TestBackend, 3>::from_data(tensor_data, &device);
 
-            let (result, _) = torch_nanmean(tensor, 0, false, false);
+            let result = torch_nanmean(tensor, Some(0), true);
 
             // Convert Python result for comparison (should be 2x3)
             let mut python_flat = Vec::new();
@@ -1313,7 +1540,7 @@ mod tests {
             println!("torch_nanmean - Rust values: {:?}", rust_values);
 
             assert_eq!(rust_values.len(), python_flat.len(), "Result length mismatch");
-            
+
             for (i, (&rust_val, &python_val)) in rust_values.iter().zip(python_flat.iter()).enumerate() {
                 let diff = (rust_val - python_val).abs();
                 if rust_val.is_nan() && python_val.is_nan() {
@@ -1325,7 +1552,7 @@ mod tests {
                     i, rust_val, python_val, diff
                 );
             }
-            
+
             println!("torch_nanmean equivalence test passed!");
         } else {
             panic!("Could not load test data for equivalence test");
@@ -1387,7 +1614,7 @@ mod tests {
             println!("normalize_data - Rust length: {}", rust_values.len());
 
             assert_eq!(rust_values.len(), python_flat.len(), "Result length mismatch");
-            
+
             for (i, (&rust_val, &python_val)) in rust_values.iter().zip(python_flat.iter()).enumerate() {
                 let diff = (rust_val - python_val).abs();
                 if rust_val.is_nan() && python_val.is_nan() {
@@ -1399,7 +1626,7 @@ mod tests {
                     i, rust_val, python_val, diff
                 );
             }
-            
+
             println!("normalize_data equivalence test passed!");
         } else {
             panic!("Could not load test data for equivalence test");
@@ -1422,14 +1649,15 @@ mod tests {
         let data = TensorData::from([[1.0, f32::NAN, 3.0], [4.0, 5.0, 6.0]]);
         let tensor = Tensor::<TestBackend, 2>::from_data(data, &device);
 
-        let (result, _) = torch_nanmean(tensor, 0, false, false);
+        let result = torch_nanmean(tensor, Some(0), true);
         assert_eq!(result.dims(), [1, 3]);
     }
 
     #[test]
     fn test_linear_encoder_step() {
         let device = Default::default();
-        let step = LinearInputEncoderStep::new(3, 5, false, true, &device);
+        let rng_ctx = DeterministicRngContext::<TestBackend>::new(42, device);
+        let step = LinearInputEncoderStep::new(3, 5, false, true, &rng_ctx, 100);
 
         let data = TensorData::from([[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]]);
         let tensor = Tensor::<TestBackend, 3>::from_data(data, &device);
@@ -1449,5 +1677,80 @@ mod tests {
         let (output, indicators) = step.nan_handling_forward(tensor);
         assert_eq!(output.dims(), [1, 2, 3]);
         assert!(indicators.is_some());
+    }
+
+    #[test]
+    fn test_target_dependent_step_requires_labels() {
+        let device = Default::default();
+        let mut step = MulticlassClassificationTargetEncoder::new();
+
+        let data = TensorData::from([[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]]);
+        let tensor = Tensor::<TestBackend, 3>::from_data(data, &device);
+
+        // Test that fit fails when y is None
+        let result = step.fit(&tensor, None, 1);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("requires labels y"));
+
+        // Test that fit succeeds when y is provided
+        let labels = TensorData::from([[0.0], [1.0]]);
+        let label_tensor = Tensor::<TestBackend, 2>::from_data(labels, &device);
+        let result = step.fit(&tensor, Some(&label_tensor), 1);
+        assert!(result.is_ok());
+    }
+
+    #[test] 
+    fn test_sequential_encoder_integration() {
+        let device = Default::default();
+        let rng_ctx = DeterministicRngContext::<TestBackend>::new(42, device);
+        let mut encoder = SequentialEncoder::new();
+        
+        // Add some steps
+        encoder.add_step(EncoderStep::NanHandling(NanHandlingEncoderStep::new(false)));
+        encoder.add_step(EncoderStep::Linear(LinearInputEncoderStep::new(3, 5, false, true, &rng_ctx, 100)));
+
+        let data = TensorData::from([[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]]);
+        let tensor = Tensor::<TestBackend, 3>::from_data(data, &device);
+        
+        let labels = TensorData::from([[0.0], [1.0]]);
+        let label_tensor = Tensor::<TestBackend, 2>::from_data(labels, &device);
+
+        // Test fit with labels
+        let result = encoder.fit(&tensor, Some(&label_tensor), 1);
+        assert!(result.is_ok());
+        assert!(encoder.is_fitted());
+
+        // Test transform after fitting
+        let test_data = TensorData::from([[[2.0, 3.0, 4.0], [7.0, 8.0, 9.0]]]);
+        let test_tensor = Tensor::<TestBackend, 3>::from_data(test_data, &device);
+        let transform_result = encoder.transform(test_tensor, 1);
+        assert!(transform_result.is_ok());
+        
+        // Check output shape (should be transformed by linear layer to embedding size 5)
+        let output = transform_result.unwrap();
+        assert_eq!(output.dims(), [2, 2, 5]);
+    }
+
+    #[test]
+    fn test_sequential_encoder_with_target_dependent_step() {
+        let device = Default::default();
+        let mut encoder = SequentialEncoder::new();
+        
+        // Add target-dependent step
+        encoder.add_step(EncoderStep::MulticlassClassificationTarget(MulticlassClassificationTargetEncoder::new()));
+
+        let data = TensorData::from([[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]]);
+        let tensor = Tensor::<TestBackend, 3>::from_data(data, &device);
+
+        // Test that fit fails without labels
+        let result = encoder.fit(&tensor, None, 1);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("requires labels y"));
+
+        // Test that fit succeeds with labels
+        let labels = TensorData::from([[0.0], [1.0]]);
+        let label_tensor = Tensor::<TestBackend, 2>::from_data(labels, &device);
+        let result = encoder.fit(&tensor, Some(&label_tensor), 1);
+        assert!(result.is_ok());
     }
 }

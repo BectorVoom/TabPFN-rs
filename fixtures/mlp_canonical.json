@@ -1,0 +1,90 @@
+{
+  "test_type": "mlp_canonical",
+  "description": "Canonical MLP test case with exact values for cross-language verification",
+  "input_shape": [
+    3
+  ],
+  "input": [
+    1.0,
+    2.0,
+    -1.0
+  ],
+  "network": {
+    "size": 3,
+    "hidden_size": 4,
+    "activation": "GELU",
+    "bias": false
+  },
+  "weights": {
+    "linear1": [
+      [
+        0.1,
+        0.2,
+        0.3
+      ],
+      [
+        0.0,
+        -0.1,
+        0.2
+      ],
+      [
+        0.5,
+        0.5,
+        0.5
+      ],
+      [
+        -0.2,
+        0.1,
+        0.0
+      ]
+    ],
+    "linear2": [
+      [
+        1.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        1.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        1.0,
+        0.0
+      ]
+    ]
+  },
+  "expected_output": [
+    0.11585194,
+    -0.1378313,
+    0.84134475
+  ],
+  "tolerance": {
+    "atol": 1e-06,
+    "rtol": 1e-06
+  },
+  "intermediate_values": {
+    "hidden_after_linear1": [
+      0.2,
+      -0.4,
+      1.0,
+      0.0
+    ],
+    "hidden_after_gelu": [
+      0.11585193692489504,
+      -0.13783132306076437,
+      0.8413447361676363,
+      0.0
+    ]
+  },
+  "metadata": {
+    "gelu_formula": "exact_erf",
+    "weight_layout": "pytorch_out_in",
+    "note": "Burn uses [in_features, out_features] layout - transpose needed"
+  }
+}
