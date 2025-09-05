@@ -1,0 +1,185 @@
+{
+  "format_version": "1.0",
+  "description": "TabPFN MultiHeadAttention test fixtures for Rust parity testing",
+  "generation_date": "2024-08-12",
+  "total_cases": 8,
+  "cases": [
+    {
+      "case_id": "basic_self_attn_small",
+      "filename": "basic_self_attn_small.npz",
+      "seed": 42,
+      "config": {
+        "batch_size": 2,
+        "seq_len_q": 4,
+        "seq_len_kv": 4,
+        "emsize": 32,
+        "nhead": 4,
+        "d_k": 8,
+        "d_v": 8,
+        "share_kv_across_n_heads": 1,
+        "dropout_p": null,
+        "use_self_attention": true,
+        "cache_scenario": "none"
+      },
+      "input_keys": ["x"],
+      "weight_keys": ["w_qkv", "w_out"],
+      "output_keys": ["output"],
+      "cache_keys": []
+    },
+    {
+      "case_id": "cross_attention",
+      "filename": "cross_attention.npz",
+      "seed": 123,
+      "config": {
+        "batch_size": 1,
+        "seq_len_q": 6,
+        "seq_len_kv": 8,
+        "emsize": 64,
+        "nhead": 4,
+        "d_k": 16,
+        "d_v": 16,
+        "share_kv_across_n_heads": 1,
+        "dropout_p": null,
+        "use_self_attention": false,
+        "cache_scenario": "none"
+      },
+      "input_keys": ["x", "x_kv"],
+      "weight_keys": ["w_q", "w_kv", "w_out"],
+      "output_keys": ["output"],
+      "cache_keys": []
+    },
+    {
+      "case_id": "different_dk_dv",
+      "filename": "different_dk_dv.npz",
+      "seed": 456,
+      "config": {
+        "batch_size": 2,
+        "seq_len_q": 4,
+        "seq_len_kv": 4,
+        "emsize": 48,
+        "nhead": 3,
+        "d_k": 12,
+        "d_v": 20,
+        "share_kv_across_n_heads": 1,
+        "dropout_p": null,
+        "use_self_attention": true,
+        "cache_scenario": "none"
+      },
+      "input_keys": ["x"],
+      "weight_keys": ["w_q", "w_k", "w_v", "w_out"],
+      "output_keys": ["output"],
+      "cache_keys": []
+    },
+    {
+      "case_id": "kv_sharing",
+      "filename": "kv_sharing.npz",
+      "seed": 789,
+      "config": {
+        "batch_size": 1,
+        "seq_len_q": 4,
+        "seq_len_kv": 4,
+        "emsize": 64,
+        "nhead": 8,
+        "d_k": 8,
+        "d_v": 8,
+        "share_kv_across_n_heads": 2,
+        "dropout_p": null,
+        "use_self_attention": true,
+        "cache_scenario": "none"
+      },
+      "input_keys": ["x"],
+      "weight_keys": ["w_qkv", "w_out"],
+      "output_keys": ["output"],
+      "cache_keys": []
+    },
+    {
+      "case_id": "with_caching",
+      "filename": "with_caching.npz",
+      "seed": 101112,
+      "config": {
+        "batch_size": 1,
+        "seq_len_q": 6,
+        "seq_len_kv": 6,
+        "emsize": 32,
+        "nhead": 4,
+        "d_k": 8,
+        "d_v": 8,
+        "share_kv_across_n_heads": 1,
+        "dropout_p": null,
+        "use_self_attention": true,
+        "cache_scenario": "cache_kv"
+      },
+      "input_keys": ["x"],
+      "weight_keys": ["w_qkv", "w_out"],
+      "output_keys": ["output_with_cache"],
+      "cache_keys": ["kv_cache"]
+    },
+    {
+      "case_id": "use_cached_kv",
+      "filename": "use_cached_kv.npz",
+      "seed": 131415,
+      "config": {
+        "batch_size": 1,
+        "seq_len_q": 4,
+        "seq_len_kv": 4,
+        "emsize": 32,
+        "nhead": 2,
+        "d_k": 16,
+        "d_v": 16,
+        "share_kv_across_n_heads": 1,
+        "dropout_p": null,
+        "use_self_attention": true,
+        "cache_scenario": "use_cached"
+      },
+      "input_keys": ["x", "x_new_query"],
+      "weight_keys": ["w_qkv", "w_out"],
+      "output_keys": ["output_with_cached_kv"],
+      "cache_keys": ["kv_cache_used"]
+    },
+    {
+      "case_id": "streaming",
+      "filename": "streaming.npz",
+      "seed": 161718,
+      "config": {
+        "batch_size": 1,
+        "seq_len_q": 8,
+        "seq_len_kv": 8,
+        "emsize": 48,
+        "nhead": 4,
+        "d_k": 12,
+        "d_v": 12,
+        "share_kv_across_n_heads": 1,
+        "dropout_p": null,
+        "use_self_attention": true,
+        "cache_scenario": "streaming",
+        "chunk_size": 4
+      },
+      "input_keys": ["x", "x_chunk1", "x_chunk2"],
+      "weight_keys": ["w_qkv", "w_out"],
+      "output_keys": ["output_chunk1", "output_chunk2", "output_full_reference"],
+      "cache_keys": []
+    },
+    {
+      "case_id": "large_batch_dropout",
+      "filename": "large_batch_dropout.npz",
+      "seed": 192021,
+      "config": {
+        "batch_size": 4,
+        "seq_len_q": 3,
+        "seq_len_kv": 3,
+        "emsize": 64,
+        "nhead": 8,
+        "d_k": 8,
+        "d_v": 8,
+        "share_kv_across_n_heads": 1,
+        "dropout_p": 0.1,
+        "use_self_attention": true,
+        "cache_scenario": "none"
+      },
+      "input_keys": ["x"],
+      "weight_keys": ["w_qkv", "w_out"],
+      "output_keys": ["output"],
+      "cache_keys": []
+    }
+  ]
+}

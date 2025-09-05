@@ -1,0 +1,50 @@
+Gradient Preservation Test Requirements
+======================================
+
+Problem: Training code paths must preserve gradient computation by avoiding premature scalar 
+extraction via to_data() on loss tensors used for backward pass.
+
+Test Requirements:
+
+1. Loss Tensor Gradient Chain:
+   - Loss functions must return Tensor<Autodiff<B>, D> rather than scalar values
+   - Loss tensors must support .backward() without panics or errors
+   - Gradient computation must flow back through entire computation graph
+   - Must not call to_data() on tensors before backward() in training paths
+
+2. Backward Pass Functionality:
+   - Loss.backward() must execute successfully and compute gradients
+   - Parameter gradients must be populated after backward() call
+   - Gradient values must be non-zero for parameters that affect loss
+   - Multiple backward() calls should accumulate gradients correctly
+
+3. Scalar Extraction Timing:
+   - Scalar loss values for logging/assertions must be extracted AFTER backward()
+   - Use loss.clone().to_element() or similar for extracting values post-backward
+   - Avoid to_data() calls on any tensor in the computation graph before backward()
+
+4. Production vs Test Code:
+   - Training code must preserve gradients throughout forward and backward pass
+   - Test code can extract scalars for assertions but only after gradient computation
+   - Clear separation between gradient-preserving and validation code paths
+
+5. Memory Management:
+   - Gradient computation should not cause excessive memory usage
+   - Intermediate tensors should be properly managed in autodiff graph
+   - No memory leaks from retained gradient graphs
+
+6. Integration Testing:
+   - End-to-end training loop must work with gradient preservation
+   - Optimizer updates must receive proper gradients from preserved computation
+   - Loss values for monitoring must be extractable without breaking gradients
+
+7. Error Handling:
+   - Clear error messages when gradient chain is accidentally broken
+   - Graceful handling of backward() calls on detached tensors
+   - Proper cleanup of gradient computation resources
+
+Expected Test Outcome:
+- Training loops execute successfully with proper gradient flow
+- Loss values can be monitored without interfering with gradient computation
+- Parameter updates occur correctly based on computed gradients
+- No gradient chain breaks due to premature scalar extraction

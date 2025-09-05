@@ -1,0 +1,159 @@
+{
+  "format_version": "1.0",
+  "description": "TabPFN transformer reference outputs for Rust parity testing",
+  "schema": {
+    "seed": "integer random seed used for generation",
+    "num_classes": "number of classes in classification task",
+    "X_train": "training features as nested array [N_train][F]",
+    "y_train": "training labels as array [N_train]",
+    "X_test": "test features as nested array [N_test][F]",
+    "probs": "predicted probabilities as nested array [N_test][num_classes]"
+  },
+  "tolerances": {
+    "absolute": 1e-05,
+    "relative": 1e-06,
+    "note": "May need to use atol=1e-4 for float32/burn differences"
+  },
+  "total_cases": 6,
+  "main_reference": "reference_outputs.json",
+  "cases": [
+    {
+      "case_id": "small_binary",
+      "filename": "reference_small_binary.json",
+      "seed": 42,
+      "num_classes": 2,
+      "shapes": {
+        "X_train": [
+          8,
+          5
+        ],
+        "y_train": [
+          8
+        ],
+        "X_test": [
+          4,
+          5
+        ],
+        "probs": [
+          4,
+          2
+        ]
+      }
+    },
+    {
+      "case_id": "medium_multiclass",
+      "filename": "reference_medium_multiclass.json",
+      "seed": 123,
+      "num_classes": 3,
+      "shapes": {
+        "X_train": [
+          16,
+          8
+        ],
+        "y_train": [
+          16
+        ],
+        "X_test": [
+          6,
+          8
+        ],
+        "probs": [
+          6,
+          3
+        ]
+      }
+    },
+    {
+      "case_id": "large_binary",
+      "filename": "reference_large_binary.json",
+      "seed": 456,
+      "num_classes": 2,
+      "shapes": {
+        "X_train": [
+          32,
+          12
+        ],
+        "y_train": [
+          32
+        ],
+        "X_test": [
+          8,
+          12
+        ],
+        "probs": [
+          8,
+          2
+        ]
+      }
+    },
+    {
+      "case_id": "single_feature",
+      "filename": "reference_single_feature.json",
+      "seed": 789,
+      "num_classes": 2,
+      "shapes": {
+        "X_train": [
+          6,
+          1
+        ],
+        "y_train": [
+          6
+        ],
+        "X_test": [
+          3,
+          1
+        ],
+        "probs": [
+          3,
+          2
+        ]
+      }
+    },
+    {
+      "case_id": "many_classes",
+      "filename": "reference_many_classes.json",
+      "seed": 101112,
+      "num_classes": 4,
+      "shapes": {
+        "X_train": [
+          20,
+          6
+        ],
+        "y_train": [
+          20
+        ],
+        "X_test": [
+          5,
+          6
+        ],
+        "probs": [
+          5,
+          3
+        ]
+      }
+    },
+    {
+      "case_id": "high_dimensional",
+      "filename": "reference_high_dimensional.json",
+      "seed": 131415,
+      "num_classes": 2,
+      "shapes": {
+        "X_train": [
+          24,
+          20
+        ],
+        "y_train": [
+          24
+        ],
+        "X_test": [
+          6,
+          20
+        ],
+        "probs": [
+          6,
+          2
+        ]
+      }
+    }
+  ]
+}

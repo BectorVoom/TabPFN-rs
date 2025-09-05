@@ -1,0 +1,48 @@
+NaN Detection Test Requirements
+===============================
+
+Problem: has_nan_device_safe must use device-side tensor operations for NaN detection 
+instead of CPU synchronization via to_data(), working with autodiff backends.
+
+Test Requirements:
+
+1. Device-Side NaN Detection:
+   - has_nan_device_safe must detect NaN values using tensor.is_nan().any()
+   - Must avoid CPU synchronization via to_data() for performance
+   - Must work on tensors of various dimensions (1D, 2D, 3D, 4D)
+   - Must use minimal CPU sync for only the final boolean scalar result
+
+2. Accuracy Requirements:
+   - Must return true if ANY element in tensor contains NaN
+   - Must return false if ALL elements are finite or infinite (but not NaN)
+   - Must handle tensors with mixed NaN and non-NaN values correctly
+   - Must work with tensors containing only NaN values
+
+3. Backend Compatibility:
+   - Must work with Tensor<Autodiff<NdArray<f32>>, D> tensors
+   - Must work with Tensor<NdArray<f32>, D> tensors  
+   - Function signature must be generic over backend type
+   - Must not require different implementations for different backends
+
+4. Performance Requirements:
+   - Must perform detection entirely on device (GPU/CPU backend device)
+   - Only final boolean result should be transferred to host
+   - Should be efficient for large tensors (avoid element-wise iteration on host)
+   - Execution time should be reasonable for typical ML tensor sizes
+
+5. Edge Cases:
+   - Empty tensors should return false (no NaN in zero elements)
+   - Tensors with infinity values but no NaN should return false
+   - Tensors with negative zero should return false
+   - Very large tensors should not cause memory issues
+
+6. Integration with Forward Pass:
+   - Function must be callable during transformer forward pass
+   - Should not interfere with gradient computation in autodiff mode
+   - Should provide meaningful error messages when NaN detected
+
+Expected Test Outcome:
+- has_nan_device_safe accurately detects NaN presence without false positives/negatives
+- Function uses device-side operations with minimal CPU synchronization
+- Works identically across different backend types and tensor dimensions
+- Integrates seamlessly with existing tensor processing pipelines

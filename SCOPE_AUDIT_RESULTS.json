@@ -1,0 +1,174 @@
+{
+  "scope_audit_results": {
+    "summary": {
+      "total_files_analyzed": 15,
+      "issues_found": {
+        "non_deterministic_init": 5,
+        "global_rng_usage": 4,
+        "cpu_sync_operations": 58,
+        "forward_randomness": 3
+      },
+      "already_converted": {
+        "mlp_constructor": "✅ Already uses DeterministicRngContext",
+        "attention_constructor": "✅ Already uses DeterministicRngContext", 
+        "encoder_layer_constructor": "✅ Already uses DeterministicRngContext",
+        "deterministic_helpers": "✅ DeterministicLinear/DeterministicEmbedding implemented"
+      }
+    },
+    "issues_by_category": {
+      "non_deterministic_initialization": [
+        {
+          "path": "src/tabpfn/architectures/base/transformer_corrected.rs",
+          "line_range": "360-361",
+          "code_excerpt": "let embeddings = nn::EmbeddingConfig::new(num_global_att_tokens_for_compression, ninp).init(device);",
+          "reason": "init",
+          "function": "PerFeatureTransformer::new",
+          "fix_needed": "Replace with rng_ctx.create_deterministic_embedding()"
+        },
+        {
+          "path": "src/tabpfn/architectures/base/transformer_corrected.rs", 
+          "line_range": "391-392",
+          "code_excerpt": "let decoder_linear1 = nn::LinearConfig::new(ninp, nhid).init(device); let decoder_linear2 = nn::LinearConfig::new(nhid, n_out).init(device);",
+          "reason": "init",
+          "function": "PerFeatureTransformer::new",
+          "fix_needed": "Replace with rng_ctx.create_deterministic_linear()"
+        },
+        {
+          "path": "src/tabpfn/architectures/base/transformer_corrected.rs",
+          "line_range": "399",
+          "code_excerpt": "Some(nn::EmbeddingConfig::new(1000, ninp).init(device))",
+          "reason": "init", 
+          "function": "PerFeatureTransformer::new",
+          "fix_needed": "Replace with rng_ctx.create_deterministic_embedding()"
+        },
+        {
+          "path": "src/tabpfn/architectures/base/train.rs",
+          "line_range": "470",
+          "code_excerpt": "let loss_fn = CrossEntropyLossConfig::new().init(device);",
+          "reason": "init",
+          "function": "TabPFNTrainer::train_step",
+          "fix_needed": "Use device parameter directly"
+        },
+        {
+          "path": "src/tabpfn/architectures/base/train.rs", 
+          "line_range": "553",
+          "code_excerpt": "let loss_fn = CrossEntropyLossConfig::new().init(device);",
+          "reason": "init",
+          "function": "TabPFNTrainer::validate",
+          "fix_needed": "Use device parameter directly"
+        }
+      ],
+      "global_rng_usage": [
+        {
+          "path": "src/tabpfn/architectures/base/validation.rs",
+          "line_range": "185",
+          "code_excerpt": "let num_samples = rand::random::<usize>() %",
+          "reason": "randomness",
+          "function": "SyntheticTaskGenerator::generate_classification_task",
+          "fix_needed": "Add rng: &mut StdRng parameter"
+        },
+        {
+          "path": "src/tabpfn/architectures/base/validation.rs", 
+          "line_range": "233",
+          "code_excerpt": "let num_samples = rand::random::<usize>() %",
+          "reason": "randomness", 
+          "function": "SyntheticTaskGenerator::generate_regression_task",
+          "fix_needed": "Add rng: &mut StdRng parameter"
+        },
+        {
+          "path": "src/tabpfn/architectures/base/validation.rs",
+          "line_range": "747", 
+          "code_excerpt": "indices.shuffle(&mut rand::thread_rng());",
+          "reason": "randomness",
+          "function": "K_FoldValidator::sample_indices", 
+          "fix_needed": "Add rng: &mut StdRng parameter"
+        },
+        {
+          "path": "src/tabpfn/architectures/base/transformer_corrected.rs",
+          "line_range": "173",
+          "code_excerpt": "let mut rng = StdRng::from_rng(thread_rng()).map_err(|e| format!(\"Failed to create RNG: {}\", e))?;",
+          "reason": "randomness",
+          "function": "add_pos_emb (DAG eigenvector sign flipping)",
+          "fix_needed": "Accept rng: &mut StdRng parameter instead"
+        }
+      ],
+      "forward_randomness_needing_rng_param": [
+        {
+          "path": "src/tabpfn/architectures/base/transformer_corrected.rs",
+          "line_range": "500-600",
+          "code_excerpt": "Layer dropout and positional embedding generation",
+          "reason": "forward",
+          "function": "PerFeatureTransformer::transformer_forward", 
+          "fix_needed": "Add rng: Option<&mut StdRng> parameter for layer dropout"
+        },
+        {
+          "path": "src/tabpfn/architectures/base/transformer_corrected.rs",
+          "line_range": "140-180", 
+          "code_excerpt": "add_pos_emb function with eigenvector sign randomization",
+          "reason": "forward",
+          "function": "add_pos_emb",
+          "fix_needed": "Accept rng: &mut StdRng instead of creating local RNG"
+        },
+        {
+          "path": "src/tabpfn/architectures/base/layer.rs",
+          "line_range": "400-500",
+          "code_excerpt": "Layer dropout in encoder forward pass",
+          "reason": "forward", 
+          "function": "PerFeatureEncoderLayer::forward",
+          "fix_needed": "Add rng: Option<&mut StdRng> parameter"
+        }
+      ],
+      "cpu_sync_operations": [
+        {
+          "path": "src/tabpfn/architectures/base/encoders.rs",
+          "line_range": "315, 1267-1268, 1305-1306, 1535-1536, 1609-1610",
+          "code_excerpt": "Multiple .to_data(), .as_slice() calls for data processing",
+          "reason": "cpu-sync",
+          "function": "Various encoder functions",
+          "fix_needed": "Review necessity - some may be legitimate for categorical encoding"
+        },
+        {
+          "path": "src/tabpfn/architectures/base/encoders2.rs",
+          "line_range": "317, 1261-1262, 1299-1300, 1524-1525, 1598-1599", 
+          "code_excerpt": "Multiple .to_data(), .as_slice() calls for data processing",
+          "reason": "cpu-sync",
+          "function": "Various encoder functions",
+          "fix_needed": "Review necessity - some may be legitimate for categorical encoding"
+        },
+        {
+          "path": "src/tabpfn/architectures/base/transformer.rs",
+          "line_range": "972, 1113, 1119, 1572-1573, 1826-1827, 1950-1951, 2003-2004",
+          "code_excerpt": "Multiple .to_data(), .as_slice() calls in tests and embedding processing", 
+          "reason": "cpu-sync",
+          "function": "Various transformer functions and tests",
+          "fix_needed": "Tests are acceptable, review production embedding processing"
+        },
+        {
+          "path": "src/tabpfn/architectures/base/mlp.rs",
+          "line_range": "476, 503, 520, 557, 580-581, 624-626, 652-653",
+          "code_excerpt": "Multiple .into_data() calls in test functions", 
+          "reason": "cpu-sync",
+          "function": "MLP test functions",
+          "fix_needed": "Tests are acceptable, no changes needed"
+        }
+      ]
+    },
+    "constructor_status": {
+      "already_deterministic": [
+        "src/tabpfn/architectures/base/mlp.rs::MLP::new - ✅ Uses DeterministicRngContext",
+        "src/tabpfn/architectures/base/attention/full_attention.rs::MultiHeadAttention::new - ✅ Uses DeterministicRngContext", 
+        "src/tabpfn/architectures/base/layer.rs::PerFeatureEncoderLayer::new - ✅ Uses DeterministicRngContext",
+        "src/tabpfn/architectures/base/layer.rs::LayerNorm::new - ✅ Uses DeterministicRngContext"
+      ],
+      "needs_conversion": [
+        "src/tabpfn/architectures/base/transformer_corrected.rs::PerFeatureTransformer::new - ❌ Uses .init(device) calls, needs rng_ctx parameter"
+      ]
+    },
+    "priority_fixes": [
+      "1. Fix PerFeatureTransformer::new constructor - replace .init(device) calls", 
+      "2. Remove global RNG from validation.rs functions",
+      "3. Add rng parameter to forward methods with randomness",
+      "4. Review CPU sync operations for necessity"
+    ]
+  }
+}

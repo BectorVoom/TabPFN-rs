@@ -1,0 +1,45 @@
+Tensor Constructor Test Requirements
+====================================
+
+Problem: Calls like Tensor::from_floats(&[1.0f32, 2.0f32], device) fail due to Into<TensorData> 
+trait bounds in Burn 0.18. Need to use Vec-based approach.
+
+Test Requirements:
+
+1. Float Tensor Construction:
+   - tensor_from_f32_vec must create tensors with specified shape and f32 dtype
+   - Must work for 1D, 2D, 3D, and 4D tensors
+   - Data values must be preserved exactly in the tensor
+   - Must work with both NdArray<f32> and Autodiff<NdArray<f32>> backends
+
+2. Integer Tensor Construction:
+   - tensor_from_i64_vec must create tensors with Int element type
+   - Shape and data preservation requirements same as float tensors
+   - Must handle negative integers correctly
+
+3. Boolean Tensor Construction:  
+   - tensor_from_bool_vec must create tensors with Bool element type
+   - Must handle true/false values correctly
+   - Shape preservation same as other tensor types
+
+4. Burn 0.18 API Compatibility:
+   - All constructors must use Vec<T> + .as_slice() pattern
+   - Must satisfy Into<TensorData> trait bounds without custom implementations
+   - No direct &[T] slice usage that fails compilation
+   - Must use .reshape() for higher-dimensional tensors
+
+5. Helper Function Integration:
+   - All helpers must be callable from test code without backend type restrictions
+   - Must provide clear compilation error messages if used incorrectly
+   - Should include brief comments referencing Burn 0.18 API constraints
+
+6. Edge Cases:
+   - Empty vectors should create valid zero-element tensors
+   - Large data arrays should work without performance issues
+   - NaN and infinite values should be preserved in float tensors
+
+Expected Test Outcome:
+- All tensor_from_*_vec functions compile without errors
+- Created tensors have correct shape, dtype, and data values
+- Functions work identically across different backend types
+- No Into<TensorData> trait bound compilation failures

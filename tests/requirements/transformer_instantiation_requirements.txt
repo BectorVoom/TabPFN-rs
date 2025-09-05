@@ -1,0 +1,34 @@
+Transformer Instantiation Test Requirements
+==========================================
+
+Problem: PerFeatureTransformer::<TestBackend>::new(...) returns Ok(model) when TestBackend is 
+Autodiff<NdArray<f32>>, but trait bounds currently prevent these associated functions from being callable.
+
+Test Requirements:
+
+1. Instantiation Test:
+   - PerFeatureTransformer::<Autodiff<NdArray<f32>>>::new(...) must return Ok(model)
+   - The model must be properly initialized with all required components
+   - Must work with standard ModelConfig parameters
+
+2. Associated Function Access:
+   - nalgebra_to_tensor must be callable on PerFeatureTransformer::<Autodiff<NdArray<f32>>>
+   - nalgebra_vector_to_tensor must be callable on PerFeatureTransformer::<Autodiff<NdArray<f32>>>
+   - has_nan_device_safe must be callable on PerFeatureTransformer::<Autodiff<NdArray<f32>>>
+
+3. Shape and Behavior Verification:
+   - nalgebra_to_tensor converts DMatrix<f32> to Tensor<Autodiff<NdArray<f32>>, 2> with preserved shape
+   - nalgebra_vector_to_tensor converts DVector<f32> to Tensor<Autodiff<NdArray<f32>>, 1> with preserved length
+   - has_nan_device_safe correctly detects NaN values in tensors using device-side operations
+   - has_nan_device_safe returns false for tensors without NaN values
+
+4. Backend Compatibility:
+   - All functions must work seamlessly with the Autodiff wrapper
+   - Conversion between inner backend tensors and autodiff tensors must use supported Burn 0.18 paths
+   - No custom ad-hoc conversions should be required
+
+Expected Test Outcome:
+- All associated functions are accessible without compilation errors
+- Functions behave identically whether called on forward-only or autodiff backends
+- Shape preservation is maintained across all tensor conversion operations
+- NaN detection works reliably using device-side tensor operations

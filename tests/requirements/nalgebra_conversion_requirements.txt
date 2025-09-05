@@ -1,0 +1,46 @@
+Nalgebra Conversion Test Requirements
+====================================
+
+Problem: nalgebra_to_tensor and nalgebra_vector_to_tensor functions need to work with both 
+forward-only and autodiff backends, using proper Burn 0.18 tensor construction.
+
+Test Requirements:
+
+1. Matrix Conversion (nalgebra_to_tensor):
+   - Convert nalgebra::DMatrix<f32> to Tensor<B, 2> preserving exact shape
+   - Must work for matrices of various sizes (1x1, 3x4, 100x50, etc.)
+   - Data ordering must be preserved (row-major to tensor layout)
+   - Must work with both NdArray<f32> and Autodiff<NdArray<f32>> backends
+
+2. Vector Conversion (nalgebra_vector_to_tensor):
+   - Convert nalgebra::DVector<f32> to Tensor<B, 1> preserving length
+   - Must work for vectors of various sizes (1, 10, 1000 elements)
+   - Data values must be preserved exactly
+   - Must work with both backend types
+
+3. Data Integrity:
+   - All floating point values must be preserved with full precision
+   - Special values (NaN, infinity, -infinity) must be preserved
+   - Zero and negative values must be handled correctly
+   - Large magnitude values must not overflow or underflow
+
+4. Shape Verification:
+   - Tensor dimensions must exactly match nalgebra matrix/vector dimensions
+   - 2D tensor from matrix must have dims [rows, cols] matching matrix.shape()
+   - 1D tensor from vector must have dim [length] matching vector.len()
+
+5. Device Compatibility:
+   - Converted tensors must reside on the specified device
+   - Device parameter must be respected in tensor creation
+   - Must work with default devices for test backends
+
+6. Performance:
+   - Conversion should be efficient for typical ML matrix sizes
+   - Should not require unnecessary data copying
+   - Memory usage should be reasonable for large matrices
+
+Expected Test Outcome:
+- Both functions compile and execute without errors
+- Converted tensors have correct shapes and preserved data
+- Functions work identically on forward-only and autodiff backends  
+- No data corruption or precision loss during conversion

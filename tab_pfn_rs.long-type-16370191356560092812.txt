@@ -1,0 +1,3 @@
+std::boxed::Box<(dyn tabpfn::architectures::base::encoders::InputEncoder<B> + 'static)>: burn::module::Module<B>
+<tabpfn::architectures::base::transformer::PerFeatureTransformer<B> as burn::module::Module<B>>::Record
+<tabpfn::architectures::base::transformer::PerFeatureTransformerRecord<B> as burn::record::Record<B>>::Item<S>
